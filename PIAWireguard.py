@@ -350,7 +350,7 @@ def PIAAddKey(instance_obj, wgCn, wgIp):
 def InformNewIP(interfaceName):
     try:
         subprocess.run(['/usr/local/sbin/configctl', 'interface', 'newip', interfaceName, 'force'], capture_output=True, text=True, check=True)
-        return True            
+        return True
     except subprocess.CalledProcessError as e:
         raise ValueError(f"Error executing command: {e}")
 
