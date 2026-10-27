@@ -697,8 +697,8 @@ for instance_obj in instances_array:
     state.wgCandidates = []
     state.regionId = ''
     state.regionPortForward = None
-    # If DIP we need to login to the PIA global API and get the DIP info.
-    # First we authenicate then ask the DIP API for it's details.
+    # If DIP we need to authenticate with the PIA global API and get the DIP info.
+    # First we authenticate, then we ask the DIP API for its details.
     if instance_obj.Dip:
         logger.debug("Gathering DIP Details")
         piaDip = {
