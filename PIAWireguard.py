@@ -165,7 +165,7 @@ def CreateRequestsSession(auth, headers, verify=True):
 
 def GetRequest(session, url, params = None):
     if not isinstance(session, requests.Session):
-        raise ValueError("POST Request: Session variable not set.")
+        raise ValueError("GET Request: Session variable not set.")
     try:
         r = session.get(url, params=params, timeout=10)
         if r.status_code == 401:
@@ -178,7 +178,7 @@ def GetRequest(session, url, params = None):
 
 def PostRequest(session, url, data):
     if not isinstance(session, requests.Session):
-        raise ValueError("GET Request: Session variable not set.")
+        raise ValueError("POST Request: Session variable not set.")
     try:
         r = session.post(url, data=json.dumps(data), headers={'Content-Type': 'application/json'}, timeout=10)
         if r.status_code == 401:
@@ -474,7 +474,8 @@ if args.debug:
 try:
     configFile = os.path.join(sys.path[0], "PIAWireguard.json")
     if os.path.isfile(configFile):
-        config = json.loads(open(configFile, 'r').read(), object_pairs_hook=CheckForDupKey)
+        with open(configFile, 'r') as f:
+            config = json.loads(f.read(), object_pairs_hook=CheckForDupKey)
     else:
         logger.error(f"Failed to find config file {configFile}")
         sys.exit(1)
@@ -644,7 +645,12 @@ peers = json.loads(request.text)["rows"]
 for instance_obj in instances_array:
     for peer in peers:
         if peer['public-key'] == instance_obj.WGPeerPubkey:
-            secondsDifferent = currentEpoch - peer['latest-handshake']
+            # A peer that has never completed a handshake reports a null timestamp, treat that as long ago
+            lastHandshake = peer['latest-handshake']
+            if lastHandshake is None:
+                secondsDifferent = currentEpoch
+            else:
+                secondsDifferent = currentEpoch - lastHandshake
             if secondsDifferent > 190:
                 logger.debug(f"{instance_obj.Name} tunnel down - last handshake {str(secondsDifferent)} seconds ago")
                 instance_obj.ServerChange = True
@@ -684,7 +690,7 @@ for instance_obj in instances_array:
         try:
             piaToken = PIAToken(createObject)
         except ValueError as e:
-            logger.debug(f"Failed to get PIA Token: {str(e)}")
+            logger.error(f"Failed to get PIA Token: {str(e)}")
             sys.exit(1)
         piaAuthHeaders = {
             "Authorization": f"Token {piaToken}",
@@ -994,13 +1000,15 @@ for instance_obj in instances_array:
 
     # first we need to check if we have a port forward signature.
     if os.path.isfile(instance_obj.PortSignatureFile()):
-        wireguardSignature = json.loads(open(instance_obj.PortSignatureFile(), 'r').read())
+        with open(instance_obj.PortSignatureFile(), 'r') as f:
+            wireguardSignature = json.loads(f.read())
     else:
         newPortRequired = True
 
     # get wireguard Server information
     if os.path.isfile(instance_obj.InfoFile()):
-        wireguardServerInfo = json.loads(open(instance_obj.InfoFile(), 'r').read())
+        with open(instance_obj.InfoFile(), 'r') as f:
+            wireguardServerInfo = json.loads(f.read())
     else:
         logger.debug(f"wireguard server information missing for port forward {instance_obj.InfoFile()}")
         sys.exit(2)
