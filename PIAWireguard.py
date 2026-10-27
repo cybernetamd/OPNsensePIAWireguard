@@ -355,6 +355,11 @@ def InformNewIP(interfaceName):
         raise ValueError(f"Error executing command: {e}")
 
 def GenerateFakeWGKey():
+    """
+    Generates a placeholder Ed25519-sized public key (32 random bytes, base64 encoded).
+    This is used as a temporary key when creating the peer in OPNsense, before we know
+    the real PIA server key. It gets replaced with the real key on the first setClient call.
+    """
     key = secrets.token_bytes(32)
     public_key = base64.b64encode(key).decode('utf-8')
     return public_key
