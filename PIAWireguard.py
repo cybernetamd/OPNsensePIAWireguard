@@ -148,9 +148,9 @@ def CreateRequestsSession(auth, headers, verify = True):
     session.headers.update({'User-Agent': 'Github: FingerlessGlov3s/OPNsensePIAWireguard'})
     if headers is not None:
         session.headers.update(headers)
-    session.verify = verify # As we're connecting via local loopback we don't really need to check the certificate.
-    if verify == False:
-        urllib3.disable_warnings() # stop the warnings
+    session.verify = verify
+    if not verify:
+        urllib3.disable_warnings()
     return session
 
 def GetRequest(session, url, params = None):
