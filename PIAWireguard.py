@@ -1031,8 +1031,8 @@ for instance_obj in instances_array:
         port_expiry = datetime.datetime.strptime(expiryDate, '%Y-%m-%d %H:%M:%S')
         time_between = port_expiry - datetime.datetime.now()
         logger.debug(f"Days left on port: {str(time_between.days)}")
-        if time_between.days <= 1: # if we have 1 day to go on the port, we shall request a new port
-            logger.debug("port expired, shall request new port")
+        if time_between.days <= 1:  # if we have 1 day to go on the port, we request a new one
+            logger.debug("Port expiring soon, requesting new port")
             newPortRequired = True
         secondsDifferent = currentEpoch - wireguardSignature['refresh_epoch']
         logger.debug(f"last port refresh {str(secondsDifferent)} seconds ago (will refresh when over 599)")
