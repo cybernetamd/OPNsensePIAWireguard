@@ -304,9 +304,9 @@ def ConfigureTunnelStaticRoute(instance_obj, wgIp):
         logger.debug(f"Current Routed IP: {str(currentRoutedIP)} - Required Routed IP: {wgIp}/32")
         if currentGateway != tunnelGateway or currentRoutedIP != wgIp + '/32':
             logger.debug("Static route requires updating")
-            currentRoute['route']['network'] = wgIp+'/32'
+            currentRoute['route']['network'] = wgIp + '/32'
             currentRoute['route']['gateway'] = tunnelGateway
-            currentRoute['route']['disabled'] = 0
+            currentRoute['route']['disabled'] = '0'
             try:
                 request = PostRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/routes/routes/setRoute/{opnsenseRouteUUID}", currentRoute)
             except ValueError as e:
