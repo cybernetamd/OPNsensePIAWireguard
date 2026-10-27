@@ -4,7 +4,7 @@
 This script automates the process of getting Wireguard setup on OPNsense to connect to PIA's NextGen Wireguard servers.
 It will create Wireguard Instance(local) and Client(peer) on your OPNsense setup.
 You will need to assign the new wireguard interface and create a dynamic gateway for it, this can't be automated due to
-API retrictions.
+API restrictions.
 Script will check the Wireguard tunnel is functioning by checking handshake before changing over to a different wireguard server
 Please run this script every 5-15 minutes via cron.
 
