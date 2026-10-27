@@ -1162,7 +1162,7 @@ for instance_obj in instances_array:
             logger.debug(f"CurrentPortInAlias: {str(currentAliasPort)}")
             logger.debug(f"Required Port: {str(wireguardSignature['port'])}")
             if currentAliasPort != str(wireguardSignature['port']):
-                logger.debug("Ports don't match shall correct the Alias")
+                logger.debug("Ports don't match, correcting the Alias")
                 piaPortAlias['alias']['content'] = wireguardSignature['port']
                 piaPortAlias['alias']['type'] = 'port'
                 piaPortAlias['alias']['counters'] = ''
