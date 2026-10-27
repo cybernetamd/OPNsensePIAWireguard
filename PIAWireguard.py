@@ -1046,7 +1046,7 @@ for instance_obj in instances_array:
         override_dns(wireguardServerInfo['server_name'], wireguardServerInfo['server_vip'])
         # make a request to the WG server VIP and get our signature
         try:
-            request = GetRequest(getSignatureRequestsSession, f"https://{wireguardServerInfo['server_name']}:19999/getSignature", createObject)
+            request = PostRequest(getSignatureRequestsSession, f"https://{wireguardServerInfo['server_name']}:19999/getSignature", createObject)
         except ValueError as e:
             logger.error(f"getSignature - Error message: {str(e)}")
             sys.exit(1)
