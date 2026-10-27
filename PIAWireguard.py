@@ -459,34 +459,41 @@ except ValueError as e:
     logger.error(f"Failed to import config file {configFile} error: {str(e)}")
     sys.exit(1)
 
-# Validate our config
+# Global state shared across all instances. We use the class itself (not an instance)
+# so that all instances see the same serverList, token, etc. without passing it around.
+state = State
+
+# Check if user wanted to list regions, and if so display them
+# (listregions only needs the PIA server list URL, so we skip full config validation)
+if args.listregions:
+    try:
+        r = requests.get(state.serverList, headers={'User-Agent': 'Github: FingerlessGlov3s/OPNsensePIAWireguard'}, timeout=15)
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Failed to reach PIA server list: {e}")
+        sys.exit(2)
+    if r.status_code != 200:
+        logger.error(f"Failed to get PIA server list, URL returned HTTP {r.status_code}. Is there a connectivity issue?")
+        sys.exit(2)
+    piaRegions = json.loads(r.text.split('\n')[0])['regions']
+    regionList = []
+    for region in piaRegions:
+        regionList.append(f"{region['name']} | ID: {region['id']} | Port forwarding: {region['port_forward']} | Geo-located: {region['geo']}")
+    regionList.sort()  # PIA's payload isn't sorted by region name
+    for region in regionList:
+        logger.info(region)
+    logger.info("* Geo-located means these servers are not physically located in the region where the exit node is located. "
+                "The implementation of geo-located servers has provided us VPN services in countries where service may not "
+                "have been previously available due to restrictions, government legislation, or a lack of secure server providers.")
+    # Info from https://www.privateinternetaccess.com/helpdesk/kb/articles/geo-located-servers-we-offer
+    sys.exit(0)
+
+# Validate our config (only reached if not --listregions)
 try:
     validate_json(config)
     logger.debug("JSON validation successful.")
 except ValueError as e:
     logger.error(f"JSON validation failed: {str(e)}")
     sys.exit(1)
-
-state = State
-
-# Check if user wanted to list regions, and if so display them
-if args.listregions:
-    r = requests.get(state.serverList, timeout=15)
-    if r.status_code != 200:
-        logger.error("Failed to get PIA server list, url is returning non 200 HTTP code, is there a connectivity issue?")
-        sys.exit(2)
-    piaRegions = json.loads(r.text.split('\n')[0])['regions']
-    regionList = list()
-    for region in piaRegions:
-        regionList.append(region['name']+" | ID: "+region['id'] + " | Port forwarding: " + str(region['port_forward']) + " | Geo-located: " + str(region['geo']))
-    regionList.sort() # Now we sort the list as PIA's payload isn't in region name order.
-    for region in regionList:
-        logger.info(region)
-    logger.info("* Geo-located means these servers is not physically located in the region where the exit node is located. " +
-    "The implementation of geo-located servers has provided us VPN services in countries where service may not have been " +
-    "previously available due to restrictions, government legislation, or a lack of secure server providers")
-    # ^ Info from https://www.privateinternetaccess.com/helpdesk/kb/articles/geo-located-servers-we-offer
-    sys.exit(0)
 
 opnsenseRequestsSession = CreateRequestsSession((config['opnsenseKey'], config['opnsenseSecret']), None, False)
 try:
