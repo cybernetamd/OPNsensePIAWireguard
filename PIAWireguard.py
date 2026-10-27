@@ -1147,7 +1147,7 @@ for instance_obj in instances_array:
             opnsensePiaPortUpdated = True
             instance_obj.Port = wireguardSignature['port']
         else:
-            # get current port alias information, so we can check its the right port
+            # get current port alias information, so we can check it's the right port
             try:
                 request = GetRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/firewall/alias/getItem/{opnsensePiaPortUUID}")
             except ValueError as e:
