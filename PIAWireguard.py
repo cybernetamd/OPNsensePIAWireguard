@@ -397,14 +397,14 @@ class Instance:
     def __init__(self, data, instanceName):
         self.Name = instanceName
         self.Region = data['instances'][instanceName]["regionId"]
-       self.DipToken = data['instances'][instanceName]["dipToken"]
-       self.Dip = data['instances'][instanceName]["dip"]
-       self.Port = 0
-       self.PortForward = data['instances'][instanceName]["portForward"]
-       self.WGPort = data['instances'][instanceName]["opnsenseWGPort"]
-       self.WGUUID = ""
-       self.WGPubkey = ""
-       self.WGIP = "192.0.0.2/32" # needs a netmask, OPNsense rejects bare addresses on server.tunneladdress
+        self.DipToken = data['instances'][instanceName]["dipToken"]
+        self.Dip = data['instances'][instanceName]["dip"]
+        self.Port = 0
+        self.PortForward = data['instances'][instanceName]["portForward"]
+        self.WGPort = data['instances'][instanceName]["opnsenseWGPort"]
+        self.WGUUID = ""
+        self.WGPubkey = ""
+        self.WGIP = "192.0.0.2/32"  # needs a netmask, OPNsense rejects bare addresses on server.tunneladdress
        self.WGGateway = "192.0.0.1"
        self.WGInstance = ""
        self.WGInstanceName = f"{data['opnsenseWGPrefixName']}-{instanceName}"
