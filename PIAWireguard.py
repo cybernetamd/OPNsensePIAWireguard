@@ -1128,7 +1128,7 @@ for instance_obj in instances_array:
         if piaPortAlias:
             opnsensePiaPortUUID = piaPortAlias['uuid']
 
-        # Now we know if its does or does not exist, we can create/update it
+        # Now we know if it does or does not exist, we can create/update it
         if opnsensePiaPortUUID == '':
             createObject = {
                 "alias": {
