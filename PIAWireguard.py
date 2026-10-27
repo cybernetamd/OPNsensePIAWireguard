@@ -525,7 +525,7 @@ logger.debug("Creating/Populating Wireguard Instances array")
 wireguardInstances = json.loads(request.text)['rows']
 instances_array = []
 for instance_name in config.get('instances', {}):
-    logger.debug(f"Setting up python script for instance {instance_name}")  
+    logger.debug(f"Setting up python script for instance {instance_name}")
     instance_obj = Instance(config, instance_name)
     logger.debug(f"Looking for server instance {instance_obj.WGInstanceName} in gathered opnsense instances")
     for wireguardInstance in wireguardInstances:
