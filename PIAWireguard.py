@@ -92,7 +92,7 @@ def validate_json(data):
 
         for prop in instance_data:
             if prop not in required_instance_properties and prop != "postConfigScript":
-                logger.warning(f"Unknown property '{prop}' in instance '{instance_name}' will be ignored, check the README for the supported settings")
+                raise ValueError(f"Unknown property '{prop}' in instance '{instance_name}', check the README for the supported settings")
 
         # Additional checks for property types and values
         if not isinstance(instance_data["regionId"], str) or not instance_data["regionId"].strip():
