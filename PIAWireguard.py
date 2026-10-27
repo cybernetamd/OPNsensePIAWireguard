@@ -706,6 +706,7 @@ class State:
     regionId = ''
     regionPortForward = None
 
+    @classmethod
     def reset(cls):
         cls.port = ''
         cls.portSignature = ''
