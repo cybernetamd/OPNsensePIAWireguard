@@ -899,7 +899,7 @@ for instance_obj in instances_array:
     logger.debug(f"Updated peer")    
 
     # Apply and enable WireGuard changes.
-    # First enable WireGuard if its not
+    # First enable WireGuard if it's not
     logger.debug(f"Checking WireGuard service enabled")
     try:
         request = GetRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/wireguard/general/get")
