@@ -225,8 +225,13 @@ def CheckIpInRoutes(ip, exemptNetif):
     try:
         result = subprocess.run(['netstat', '-rWnf', 'inet'], capture_output=True, text=True, check=True)
         lines = result.stdout.splitlines()
-        lines = lines[3:]
-        for line in lines:
+        # Skip header lines: find the first line that starts with an IP-like pattern
+        data_start = 0
+        for i, line in enumerate(lines):
+            if line and line[0] in '0123456789' and 'Destination' not in line:
+                data_start = i
+                break
+        for line in lines[data_start:]:
             columns = line.split()
             if len(columns) >= 6 and columns[0] == ip and columns[5] != exemptNetif:
                 return True
