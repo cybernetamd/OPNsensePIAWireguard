@@ -595,7 +595,7 @@ for instance_name in config.get('instances', {}):
         
         # Update payload and remove unneeded bits
         wireguardPeerInstanceInfo = json.loads(request.text)['client']
-        instance_obj.WGPeerPubkey = wireguardPeerInstanceInfo['pubkey']
+        instance_obj.WGPeerPubkey = wireguardPeerInstanceInfo['pubkey'].replace("=\n\n\n", '=')
     
     logger.debug(f"Finished getting {instance_name} tunnel instance information from OPNsense")
 
