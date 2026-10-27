@@ -1052,10 +1052,10 @@ for instance_obj in instances_array:
             portRefresh = True
             logger.debug("port refresh required")
 
-    # first of we need to get a signature, signature lasts two months, we so only need to get it on serverChange. Server policy for reboots is every 2-3 months anyway
+    # First we need to get a signature, the signature lasts two months, so we only need to get it on serverChange. PIA's server policy for reboots is every 2-3 months anyway
     # Might be a good idea to set cron to change PIA server every 2 month anyway
     if newPortRequired:
-        # Port refresh required to scheduled the Wireguard server adding the port.
+        # Port refresh required to schedule the WireGuard server adding the port.
         portRefresh = True
         # get a new piatoken if we are renewing the port
         createObject = {
@@ -1097,8 +1097,8 @@ for instance_obj in instances_array:
             logger.debug(f"Saved port number to {instance_obj.WebPortFile()}")
         # written port to file
 
-    # The requested port has a timer that needs to be refresh so you can keep the port active.
-    # Must be refreshed atleast every 15 minutes.
+    # The requested port has a timer that needs to be refreshed to keep the port active.
+    # It must be refreshed at least every 15 minutes.
     # We'll also update the firewall alias during this step
     if portRefresh:
         createObject = {
