@@ -1163,7 +1163,7 @@ for instance_obj in instances_array:
             try:
                 request = GetRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/firewall/alias/getItem/{opnsensePiaPortUUID}")
             except ValueError as e:
-                logger.error(f"getAliasUUID - Error message: {str(e)}")
+                logger.error(f"getItem alias - Error message: {str(e)}")
                 sys.exit(1)
             piaPortAlias = json.loads(request.text)
             currentAliasPort = "0"
