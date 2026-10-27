@@ -367,8 +367,9 @@ def new_getaddrinfo(*args):
     """
     When address information is looked up, this function is called and will provide an IP from our cache dictionary before looking it up
     """
-    if args[0] in dns_cache:
-        return prv_getaddrinfo(dns_cache[args[0]], *args[1:])
+    domain = args[0].lower()
+    if domain in dns_cache:
+        return prv_getaddrinfo(dns_cache[domain], *args[1:])
     return prv_getaddrinfo(*args)
 socket.getaddrinfo = new_getaddrinfo
 
