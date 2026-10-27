@@ -389,8 +389,13 @@ def new_getaddrinfo(*args):
 socket.getaddrinfo = new_getaddrinfo
 
 class Instance:
+    """
+    Holds the state for one WireGuard tunnel instance from the config file.
+    The constructor pulls the static bits out of the config; the rest of the
+    attributes get populated as the script talks to OPNsense and PIA.
+    """
     def __init__(self, data, instanceName):
-       self.Name = instanceName
+        self.Name = instanceName
        self.Region = data['instances'][instanceName]["regionId"]
        self.DipToken = data['instances'][instanceName]["dipToken"]
        self.Dip = data['instances'][instanceName]["dip"]
