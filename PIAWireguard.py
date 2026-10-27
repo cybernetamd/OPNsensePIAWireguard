@@ -890,7 +890,7 @@ for instance_obj in instances_array:
     wireguardPeerInstanceInfo['client']['keepalive'] = "25"
     wireguardPeerInstanceInfo['client']['servers'] = instance_obj.WGUUID
 
-    # Update peer instance 
+    # Update peer instance
     try:
         request = PostRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/wireguard/client/setClient/{instance_obj.WGPeerUUID}", wireguardPeerInstanceInfo)
     except ValueError as e:
