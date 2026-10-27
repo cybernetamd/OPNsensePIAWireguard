@@ -864,7 +864,7 @@ for instance_obj in instances_array:
     if 'carp_depend_on' in wireguardInstanceInfo['server'].keys():
         del wireguardInstanceInfo['server']['carp_depend_on']
 
-    # Update server instance 
+    # Update server instance
     try:
         request = PostRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/wireguard/server/setServer/{instance_obj.WGUUID}", wireguardInstanceInfo)
     except ValueError as e:
