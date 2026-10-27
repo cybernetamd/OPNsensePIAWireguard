@@ -422,7 +422,7 @@ class Instance:
         self.PiaPortName = f"{data['opnsenseWGPrefixName']}_{instanceName}_port"
         self.PiaPortUUID = ""
         self.RouteUUID = ""
-        self.ServerChange = True
+        self.ServerChange = False
         self.ServerChangeFailed = False
         self.PostConfigScript = data['instances'][instanceName].get("postConfigScript", False)
     def __str__(self):
@@ -685,7 +685,7 @@ if any(instance_obj.ServerChange for instance_obj in instances_array):
 
 # Get PIA API Token if needed for DIP
 for instance_obj in instances_array:
-    if instance_obj.ServerChange == False:
+    if instance_obj.ServerChange is False:
         continue
     if instance_obj.Dip:
         createObject = {
@@ -707,7 +707,7 @@ for instance_obj in instances_array:
 
 # Now we process each instance that needs the server changing
 for instance_obj in instances_array:
-    if instance_obj.ServerChange == False:
+    if instance_obj.ServerChange is False:
         continue
     logger.debug(f"Changing server for tunnel instance {instance_obj.Name}")
 
@@ -981,7 +981,7 @@ if any(instance.PortForward and instance.ServerChange for instance in instances_
 
 # check each instance for portforwarding
 for instance_obj in instances_array:
-    if instance_obj.PortForward == False:
+    if instance_obj.PortForward is False:
         continue
 
     # The port forward requests go over the tunnel, so there's no point trying if we couldn't configure it this run
@@ -1000,7 +1000,7 @@ for instance_obj in instances_array:
 
     getSignatureRequestsSession = CreateRequestsSession(None, None, state.ca)
 
-    # If server change force new port
+    # If the server changed this run, the old port is bound to the old server so force a new one
     if instance_obj.ServerChange:
         newPortRequired = True
 
@@ -1228,16 +1228,16 @@ for instance_obj in instances_array:
     logger.debug(f"Finished processing port forward for tunnel instance {instance_obj.Name}")
 
 for instance_obj in instances_array:
-    if instance_obj.PostConfigScript and instance_obj.ServerChangeFailed == False:
+    if instance_obj.PostConfigScript and instance_obj.ServerChangeFailed is False:
         if instance_obj.ServerChange or instance_obj.Port != 0:
             logger.debug(f"Running post configuration script for {instance_obj.Name}")
 
-            args = [instance_obj.Name]
+            script_args = [instance_obj.Name]
             if instance_obj.Port != 0:
                 logger.debug(f"Adding forwarded port {instance_obj.Port} to second argument for {instance_obj.PostConfigScript}")
-                args.append(str(instance_obj.Port))  # Ensure it's a string for subprocess
+                script_args.append(str(instance_obj.Port))  # Ensure it's a string for subprocess
 
-            result = subprocess.run([instance_obj.PostConfigScript] + args, capture_output=True, text=True)
+            result = subprocess.run([instance_obj.PostConfigScript] + script_args, capture_output=True, text=True)
 
             log_level = logging.WARNING if result.returncode != 0 else logging.DEBUG
             logger.log(log_level, "Return code: %d", result.returncode)
