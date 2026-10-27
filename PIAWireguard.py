@@ -920,7 +920,7 @@ for instance_obj in instances_array:
             logger.error(f"set wireguard ON - Error message: {str(e)}")
             sys.exit(1)
     
-    ## Tell WireGuard to update it's config
+    # Tell WireGuard to update its config
     createObject = {}
     try:
         request = PostRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/wireguard/service/reconfigure", createObject)
