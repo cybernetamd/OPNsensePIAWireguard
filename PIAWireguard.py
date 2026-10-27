@@ -589,7 +589,7 @@ for instance_name in config.get('instances', {}):
                 "name": instance_obj.WGPeerName,
                 "pubkey": GenerateFakeWGKey(), # placeholder key
                 "tunneladdress": "0.0.0.0/0",
-                "keepalive ": '25',
+                "keepalive": '25',
                 "servers": instance_obj.WGUUID
             }
         }
