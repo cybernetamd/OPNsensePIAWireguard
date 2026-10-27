@@ -934,7 +934,7 @@ for instance_obj in instances_array:
     except ValueError as e:
         logger.error(f"wireguard reconfigure - Error message: {str(e)}")
         sys.exit(1)
-    
+
     # When a dynamic gateway is used, we need to set the gateway in a tmp file, so OPNsense gateway can pick it up
     # https://docs.opnsense.org/manual/gateways.html#missing-dynamic-gateway
     with open(instance_obj.GatewayFile(), 'w') as filetowrite:
