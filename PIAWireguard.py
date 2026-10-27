@@ -114,7 +114,7 @@ def validate_json(data):
             raise ValueError(f"Duplicate opnsenseWGPort found: '{opnsenseWGPort}' in instance '{instance_name}'")
         opnsenseWGPorts.add(opnsenseWGPort)
 
-# checks for duplicate keys
+# Called for every key as the JSON is parsed, raises an error on a duplicate so a typo'd key doesn't silently win
 def CheckForDupKey(ordered_pairs):
     d = {}
     for k, v in ordered_pairs:
