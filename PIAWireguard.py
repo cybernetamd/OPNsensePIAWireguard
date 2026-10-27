@@ -396,7 +396,7 @@ class Instance:
     """
     def __init__(self, data, instanceName):
         self.Name = instanceName
-       self.Region = data['instances'][instanceName]["regionId"]
+        self.Region = data['instances'][instanceName]["regionId"]
        self.DipToken = data['instances'][instanceName]["dipToken"]
        self.Dip = data['instances'][instanceName]["dip"]
        self.Port = 0
