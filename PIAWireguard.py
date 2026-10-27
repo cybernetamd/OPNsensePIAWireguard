@@ -896,7 +896,7 @@ for instance_obj in instances_array:
     except ValueError as e:
         logger.error(f"setClient - Error message: {str(e)}")
         sys.exit(1)
-    logger.debug(f"Updated peer")    
+    logger.debug(f"Updated peer")
 
     # Apply and enable WireGuard changes.
     # First enable WireGuard if it's not
