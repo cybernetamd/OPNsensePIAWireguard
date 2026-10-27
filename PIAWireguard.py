@@ -559,7 +559,7 @@ for instance_name in config.get('instances', {}):
                 "port": instance_obj.WGPort,
                 "tunneladdress": instance_obj.WGIP,
                 "disableroutes": '1',
-                "gateway": instance_obj.WGGateway,
+                "gateway": instance_obj.WGGateway
                 }
         }
 
