@@ -860,8 +860,8 @@ for instance_obj in instances_array:
     wireguardInstanceInfo['server']['peers'] = instance_obj.WGPeerUUID
     wireguardInstanceInfo['server']['port'] = instance_obj.WGPort
     wireguardInstanceInfo['server']['tunneladdress'] = wireguardServerInfo['peer_ip'] + '/32' # need to add /32 so it does not expand to /8
-    del wireguardInstanceInfo['server']['instance'] # remove this as its not required in the request
-    if 'carp_depend_on' in wireguardInstanceInfo['server'].keys(): 
+    del wireguardInstanceInfo['server']['instance']  # remove this as it's not required in the request
+    if 'carp_depend_on' in wireguardInstanceInfo['server'].keys():
         del wireguardInstanceInfo['server']['carp_depend_on']
 
     # Update server instance 
