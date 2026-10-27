@@ -1021,7 +1021,7 @@ for instance_obj in instances_array:
     # store retrieved port in this file, so external services can easily get it
     if os.path.isfile(instance_obj.WebPortFile()) is False:
         newPortRequired = True
-        logger.debug("Port not allocated, shall request port")
+        logger.debug("Port not allocated, requesting port")
 
     # We'll check the expiry of the port, and if its expired
     if wireguardSignature is not None and newPortRequired is False:
