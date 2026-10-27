@@ -1208,7 +1208,7 @@ for instance_obj in instances_array:
                 sys.exit(1)
             reconfigure = json.loads(request.text)
             if reconfigure['status'] != 'ok':
-                logger.error(f"reconfigure aliases - Error message: {str(e)}")
+                logger.error(f"reconfigure aliases - Error message: {str(reconfigure)}")
                 sys.exit(1)
             
     logger.debug(f"Finished processing port forward for tunnel instance {instance_obj.Name}")
