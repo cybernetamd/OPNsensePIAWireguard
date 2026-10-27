@@ -200,6 +200,10 @@ def PIAServerList():
         return json.loads(r.text.split('\n')[0])['regions']
     except ValueError as e:
         raise ValueError(f"GET Request: Failed {str(e)}")
+    except requests.exceptions.RequestException as e:
+        # A network-level failure (timeout, DNS, connection reset) isn't a ValueError, so catch it here
+        # and convert it, otherwise it escapes as a raw traceback instead of the clean "Failed" message
+        raise ValueError(f"GET Request: Failed - could not reach server list: {str(e)}")
 
 def GetServerList():
     """
@@ -230,6 +234,8 @@ def PIAToken(data):
         return json.loads(r.text)['token']
     except ValueError as e:
         raise ValueError(f"POST Request: Failed {str(e)}")
+    except requests.exceptions.RequestException as e:
+        raise ValueError(f"POST Request: Failed - could not reach PIA token API: {str(e)}")
 
 def CheckIpInRoutes(ip, exemptNetif):
     try:
