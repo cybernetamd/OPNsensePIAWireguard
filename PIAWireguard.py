@@ -405,20 +405,20 @@ class Instance:
         self.WGUUID = ""
         self.WGPubkey = ""
         self.WGIP = "192.0.0.2/32"  # needs a netmask, OPNsense rejects bare addresses on server.tunneladdress
-       self.WGGateway = "192.0.0.1"
-       self.WGInstance = ""
-       self.WGInstanceName = f"{data['opnsenseWGPrefixName']}-{instanceName}"
-       self.WGPeerName = f"{self.WGInstanceName}-server"
-       self.WGPeerUUID = ""
-       self.WGPeerSelected = False
-       self.WGPeerPubkey = ""
-       self.WGPeerPort = ""
-       self.PiaPortName = f"{data['opnsenseWGPrefixName']}_{instanceName}_port"
-       self.PiaPortUUID = ""
-       self.RouteUUID = ""
-       self.ServerChange = True
-       self.ServerChangeFailed = False
-       self.PostConfigScript = data['instances'][instanceName].get("postConfigScript", False)
+        self.WGGateway = "192.0.0.1"
+        self.WGInstance = ""
+        self.WGInstanceName = f"{data['opnsenseWGPrefixName']}-{instanceName}"
+        self.WGPeerName = f"{self.WGInstanceName}-server"
+        self.WGPeerUUID = ""
+        self.WGPeerSelected = False
+        self.WGPeerPubkey = ""
+        self.WGPeerPort = ""
+        self.PiaPortName = f"{data['opnsenseWGPrefixName']}_{instanceName}_port"
+        self.PiaPortUUID = ""
+        self.RouteUUID = ""
+        self.ServerChange = True
+        self.ServerChangeFailed = False
+        self.PostConfigScript = data['instances'][instanceName].get("postConfigScript", False)
     def __str__(self):
         instance_dict = {"Instance": self.WGInstanceName}
         instance_dict.update(vars(self))
