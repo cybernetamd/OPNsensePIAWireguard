@@ -315,25 +315,19 @@ def ConfigureTunnelStaticRoute(instance_obj, wgIp):
 def PIAAddKey(instance_obj, wgCn, wgIp):
     """
     Asks a PIA WireGuard server for our connection information, registering our public key with it.
-    If we're using a DIP we need to authenicate using DIP token, otherwise we use the PIA Token.
+    If we're using a DIP we need to authenticate using DIP token, otherwise we use the PIA Token.
     """
     if instance_obj.Dip:
         piaMetaSession = CreateRequestsSession((f"dedicated_ip_{instance_obj.DipToken}", wgIp), None, state.ca)
-        createObject = {
-            "pubkey": instance_obj.WGPubkey
-        }
         try:
-            request = GetRequest(piaMetaSession, f"https://{wgCn}:1337/addKey", createObject)
+            request = GetRequest(piaMetaSession, f"https://{wgCn}:1337/addKey", params={"pubkey": instance_obj.WGPubkey})
         except ValueError as e:
             raise ValueError(f"addKey DIP - Error message: {str(e)}")
     else:
+        # PIA's addKey authenticates via the "pt" query parameter
         piaMetaSession = CreateRequestsSession(None, None, state.ca)
-        createObject = {
-            "pt": state.token,
-            "pubkey": instance_obj.WGPubkey
-        }
         try:
-            request = GetRequest(piaMetaSession, f"https://{wgCn}:1337/addKey", createObject)
+            request = GetRequest(piaMetaSession, f"https://{wgCn}:1337/addKey", params={"pt": state.token, "pubkey": instance_obj.WGPubkey})
         except ValueError as e:
             raise ValueError(f"addKey non-DIP - Error message: {str(e)}")
     return json.loads(request.text)
