@@ -112,11 +112,17 @@ def validate(d):
 
 # --- PIA API ---
 def pia_token():
-    r = requests.post("https://www.privateinternetaccess.com/api/client/v2/token",
-                       headers={'User-Agent': UA, 'Content-Type': 'application/json'},
-                       data=json.dumps({"username": config['piaUsername'], "password": config['piaPassword']}), timeout=10)
-    if r.status_code != 200: raise ValueError(f"PIA token HTTP {r.status_code}")
-    return json.loads(r.text)['token']
+    try:
+        r = requests.post("https://www.privateinternetaccess.com/api/client/v2/token",
+                           headers={'User-Agent': UA, 'Content-Type': 'application/json'},
+                           data=json.dumps({"username": config['piaUsername'], "password": config['piaPassword']}), timeout=10)
+        if r.status_code == 401: raise ValueError("unauthorized")
+        if r.status_code != 200: raise ValueError(f"returned non 200 status code - {r.text}")
+        return json.loads(r.text)['token']
+    except ValueError as e:
+        raise ValueError(f"POST Request: Failed {e}")
+    except requests.exceptions.RequestException as e:
+        raise ValueError(f"POST Request: Failed - could not reach PIA token API: {e}")
 
 def pia_regions():
     try:
@@ -173,7 +179,10 @@ class Inst:
 def fake_key(): return base64.b64encode(secrets.token_bytes(32)).decode()
 
 def new_ip(iface):
-    subprocess.run(['/usr/local/sbin/configctl', 'interface', 'newip', iface, 'force'], capture_output=True, check=True)
+    try:
+        subprocess.run(['/usr/local/sbin/configctl', 'interface', 'newip', iface, 'force'], capture_output=True, check=True)
+    except subprocess.CalledProcessError as e:
+        raise ValueError(f"configctl newip {iface}: {e}")
 
 def ip_in_routes(ip, exempt):
     out = subprocess.run(['netstat', '-rWnf', 'inet'], capture_output=True, text=True, check=True).stdout.splitlines()
@@ -316,8 +325,7 @@ if __name__ == '__main__':
     if not os.path.isfile(cfgf):
         logger.error(f"Config not found: {cfgf}"); sys.exit(1)
     with open(cfgf) as f:
-        validate(json.loads(f.read(), object_pairs_hook=_dk))
-    logger.debug("Config OK")
+        cfg = json.loads(f.read(), object_pairs_hook=_dk)
 
     if args.listregions:
         try:
@@ -331,6 +339,10 @@ if __name__ == '__main__':
         logger.info("* Geo-located = not physically in exit region")
         sys.exit(0)
 
+    # --listregions only needs the PIA server list, so full config
+    # validation is deferred past the early-exit above.
+    validate(cfg)
+    logger.debug("Config OK")
     _init_osess()
 
     # Build instance array
@@ -472,8 +484,12 @@ if __name__ == '__main__':
         opost('/api/wireguard/service/reconfigure', {})
         open(inst.gwFile(),'w').write(wgi['server_vip'])
         logger.debug(f"Gateway {wgi['server_vip']} saved")
-        new_ip(f"wg{inst.WGInstance}")
-        new_ip(f"wg{inst.WGInstance}")
+        try:
+            new_ip(f"wg{inst.WGInstance}")
+            new_ip(f"wg{inst.WGInstance}")
+        except ValueError as e:
+            logger.error(f"newip: {e}")
+            sys.exit(1)
         logger.debug(f"{inst.Name} -> {inst.wgCn}")
 
     if any(i.PortForward and i.ServerChange for i in arr):
