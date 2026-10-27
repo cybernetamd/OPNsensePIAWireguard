@@ -1114,7 +1114,7 @@ for instance_obj in instances_array:
             if os.path.isfile(instance_obj.WebPortFile()):
                 os.remove(instance_obj.WebPortFile())
                 logger.error("Removed port file because status is no longer ok status returned from port refresh, will attempt new port next time")
-        
+
         # save required information to file for next time
         wireguardSignature['refresh_epoch'] = currentEpoch
         with open(instance_obj.PortSignatureFile(), 'w') as filetowrite:
