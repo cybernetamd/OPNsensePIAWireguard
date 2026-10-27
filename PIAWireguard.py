@@ -617,7 +617,7 @@ for instance_name in config.get('instances', {}):
         except ValueError as e:
             logger.error(f"getClient - Error message: {str(e)}")
             sys.exit(1)
-        
+
         # Update payload and remove unneeded bits
         wireguardPeerInstanceInfo = json.loads(request.text)['client']
         instance_obj.WGPeerPubkey = wireguardPeerInstanceInfo['pubkey'].replace("=\n\n\n", '=')
