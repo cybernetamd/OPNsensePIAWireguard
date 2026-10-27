@@ -1,1257 +1,495 @@
 #!/usr/local/bin/python3
-
 """
-This script automates the process of getting Wireguard setup on OPNsense to connect to PIA's NextGen Wireguard servers.
-It will create Wireguard Instance(local) and Client(peer) on your OPNsense setup.
-You will need to assign the new wireguard interface and create a dynamic gateway for it, this can't be automated due to
-API restrictions.
-Script will check the Wireguard tunnel is functioning by checking handshake before changing over to a different wireguard server
-Please run this script every 5-15 minutes via cron.
-
-See github Readme for setup instructions
-
-Created by FingerlessGloves
-FingerlessGlov3s on Github
-
-
-"WireGuard" is a registered trademarks of Jason A. Donenfeld.
-"Private Internet Access" is owned by Private Internet Access, Inc. All Rights Reserved
+PIA WireGuard for OPNsense. Creates/updates WG instance+peer, monitors handshakes,
+changes servers, handles port forwarding. Run every 5-15 min via cron.
+Created by FingerlessGloves (FingerlessGlov3s on GitHub)
 """
-
-import argparse
-import base64
-import datetime
-import json
-import logging
-import os
-import re
+import argparse, base64, datetime, json, logging, os, re, secrets, socket, ssl, subprocess, sys, time, urllib3
 import requests
-import socket
-import subprocess
-import sys
-import time
-import urllib3
-import secrets
-import ssl
 from requests.adapters import HTTPAdapter
 
-#
-# Please see PIAWireguard.json for configuration settings
-#
-
-#
-# Script Start
-#
-
-def validate_json(data):
-    name_pattern = re.compile(r'^[a-zA-Z0-9_]+$')
-    required_keys = ["opnsenseURL", "opnsenseKey", "opnsenseSecret", "piaUsername", "piaPassword", "opnsenseWGPrefixName", "instances"]
-    for key in required_keys:
-        if key not in data:
-            raise ValueError(f"Missing required key: {key}")
-
-    # Additional checks for non-blank string properties
-    string_properties = ["opnsenseKey", "piaUsername", "piaPassword", "opnsenseWGPrefixName"]
-    for prop in string_properties:
-        value = data.get(prop, "")
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError(f"Property '{prop}' must be a non-blank string")
-
-    if not name_pattern.match(data['opnsenseWGPrefixName']):
-        raise ValueError(f"Invalid opnsenseWGPrefixName value '{data['opnsenseWGPrefixName']}'")
-
-    # tunnelGateway is optional, a missing key or null means the same thing (no forced outgoing gateway)
-    if "tunnelGateway" in data:
-        tunnelGateway = data["tunnelGateway"]
-        if tunnelGateway is not None and (not isinstance(tunnelGateway, str) or not tunnelGateway.strip()):
-            raise ValueError("Property 'tunnelGateway' must be null or the non-blank name of a WAN gateway")
-
-    # Warn about keys we don't recognise, so typos and made up settings don't silently do nothing
-    for key in data:
-        if key not in required_keys and key != "tunnelGateway":
-            logger.warning(f"Unknown config key '{key}' will be ignored, check the README for the supported settings")
-
-    # Validate 'instances'
-    instances = data.get("instances", {})
-    if not isinstance(instances, dict) or not 1 <= len(instances) <= 10:
-        raise ValueError("Invalid 'instances' structure")
-
-    opnsenseWGPorts = set()
-    for instance_name, instance_data in instances.items():
-        if not name_pattern.match(instance_name):
-            raise ValueError(f"Invalid instance name '{instance_name}'")
-
-        if not isinstance(instance_data, dict):
-            raise ValueError(f"Invalid instance structure for '{instance_name}'")
-
-        # Additional checks for instance properties
-        required_instance_properties = ["regionId", "dipToken", "dip", "portForward", "opnsenseWGPort"]
-        for prop in required_instance_properties:
-            if prop not in instance_data:
-                raise ValueError(f"Missing required property '{prop}' in instance '{instance_name}'")
-
-        for prop in instance_data:
-            if prop not in required_instance_properties and prop != "postConfigScript":
-                raise ValueError(f"Unknown property '{prop}' in instance '{instance_name}', check the README for the supported settings")
-
-        # Additional checks for property types and values
-        if not isinstance(instance_data["regionId"], str) or not instance_data["regionId"].strip():
-            raise ValueError(f"'regionId' in instance '{instance_name}' must be a non-blank string")
-
-        if not isinstance(instance_data["dip"], bool):
-            raise ValueError(f"'dip' in instance '{instance_name}' must be a boolean (true or false)")
-
-        if not isinstance(instance_data["portForward"], bool):
-            raise ValueError(f"'portForward' in instance '{instance_name}' must be a boolean (true or false)")
-
-        if (post_script := instance_data.get("postConfigScript")) and (not isinstance(post_script, str) or not post_script.strip()):
-            raise ValueError(f"'postConfigScript' in instance '{instance_name}' must be a non-blank string to an executable file")
-
-        opnsenseWGPort = instance_data.get("opnsenseWGPort", "")
-        if not (isinstance(opnsenseWGPort, str) and opnsenseWGPort.isdigit() and 1 <= int(opnsenseWGPort) <= 65535):
-            raise ValueError(f"'opnsenseWGPort' in instance '{instance_name}' must be a number between 1 and 65535, in double quotes")
-        if opnsenseWGPort in opnsenseWGPorts:
-            raise ValueError(f"Duplicate opnsenseWGPort found: '{opnsenseWGPort}' in instance '{instance_name}'")
-        opnsenseWGPorts.add(opnsenseWGPort)
-
-# Called for every key as the JSON is parsed, raises an error on a duplicate so a typo'd key doesn't silently win
-def CheckForDupKey(ordered_pairs):
-    d = {}
-    for k, v in ordered_pairs:
-        if k in d:
-           raise ValueError("duplicate key: %r" % (k,))
-        else:
-           d[k] = v
-    return d
-
-def create_custom_ssl_context(verify=True):
-    """
-    Creates an SSL context for PIA's self-signed WireGuard certs.
-    When verify=False (used for OPNsense local loopback), we skip cert validation entirely.
-    When verify=True (used for PIA servers), we use the provided CA cert with relaxed strictness.
-    """
-    custom_context = ssl.create_default_context()
-    # PIA's certs trigger VERIFY_X509_STRICT warnings on newer OpenSSL, so relax it
-    custom_context.verify_flags &= ~ssl.VERIFY_X509_STRICT
-    if not verify:
-        custom_context.check_hostname = False
-        custom_context.verify_mode = ssl.CERT_NONE
-    return custom_context
-
-class CustomSSLAdapter(HTTPAdapter):
-    """requests adapter that injects our custom SSL context into the connection pool."""
-    def __init__(self, ssl_context=None, **kwargs):
-        self.ssl_context = ssl_context
-        super().__init__(**kwargs)
-    def init_poolmanager(self, *args, **kwargs):
-        kwargs['ssl_context'] = self.ssl_context
-        return super().init_poolmanager(*args, **kwargs)
-
-USER_AGENT = 'Github: FingerlessGlov3s/OPNsensePIAWireguard'
-
-def CreateRequestsSession(auth, headers, verify=True):
-    # For local loopback (OPNsense API) we skip cert checking; for PIA servers we use their CA cert.
-    # The adapter's SSL context is what actually controls cert validation on the connection pool,
-    # session.verify alone would be overridden by our adapter, so set both.
-    session = requests.Session()
-    ssl_context = create_custom_ssl_context(verify)
-    session.mount('https://', CustomSSLAdapter(ssl_context=ssl_context))
-    session.auth = auth
-    session.headers.update({'User-Agent': USER_AGENT})
-    if headers is not None:
-        session.headers.update(headers)
-    session.verify = verify
-    if not verify:
-        urllib3.disable_warnings()
-    return session
-
-def GetRequest(session, url, params = None):
-    if not isinstance(session, requests.Session):
-        raise ValueError("GET Request: Session variable not set.")
-    try:
-        r = session.get(url, params=params, timeout=10)
-        if r.status_code == 401:
-            raise ValueError("unauthorized")
-        if r.status_code != 200:
-            raise ValueError(f"returned non 200 status code - {r.text}")
-        return r
-    except ValueError as e:
-        raise ValueError(f"GET Request: Failed {str(e)}")
-
-def PostRequest(session, url, data):
-    if not isinstance(session, requests.Session):
-        raise ValueError("POST Request: Session variable not set.")
-    try:
-        r = session.post(url, data=json.dumps(data), headers={'Content-Type': 'application/json'}, timeout=10)
-        if r.status_code == 401:
-            raise ValueError("unauthorized")
-        if r.status_code != 200:
-            raise ValueError(f"returned non 200 status code - {r.text}")
-        return r
-    except ValueError as e:
-        raise ValueError(f"POST Request: Failed {str(e)}")
-
-def PIAServerList():
-    try:
-        url = state.serverList
-        r = requests.get(url, headers={'User-Agent': USER_AGENT}, timeout=15)
-        if r.status_code == 401:
-            raise ValueError("unauthorized")
-        if r.status_code != 200:
-            raise ValueError(f"returned non 200 status code - {r.text}")
-        return json.loads(r.text.split('\n')[0])['regions']
-    except ValueError as e:
-        raise ValueError(f"GET Request: Failed {str(e)}")
-    except requests.exceptions.RequestException as e:
-        # A network-level failure (timeout, DNS, connection reset) isn't a ValueError, so catch it here
-        # and convert it, otherwise it escapes as a raw traceback instead of the clean "Failed" message
-        raise ValueError(f"GET Request: Failed - could not reach server list: {str(e)}")
-
-def GetServerList():
-    """
-    Returns PIA's server list, only fetching it the first time it's asked for, as it isn't needed on every run
-    """
-    global serverList
-    if serverList is None:
-        serverList = PIAServerList()
-    return serverList
-
-def RegionPortForward(regionId):
-    """
-    Checks PIA's server list to see if a region supports port forwarding, returns None if the region can't be found
-    """
-    for region in GetServerList():
-        if region['id'] == regionId:
-            return region.get('port_forward')
-    return None
-
-def PIAToken(data):
-    try:
-        url = state.tokenApi
-        r = requests.post(url, headers={'User-Agent': USER_AGENT, 'Content-Type': 'application/json'}, data=json.dumps(data), timeout=10)
-        if r.status_code == 401:
-            raise ValueError("unauthorized")
-        if r.status_code != 200:
-            raise ValueError(f"returned non 200 status code - {r.text}")
-        return json.loads(r.text)['token']
-    except ValueError as e:
-        raise ValueError(f"POST Request: Failed {str(e)}")
-    except requests.exceptions.RequestException as e:
-        raise ValueError(f"POST Request: Failed - could not reach PIA token API: {str(e)}")
-
-def CheckIpInRoutes(ip, exemptNetif):
-    try:
-        result = subprocess.run(['netstat', '-rWnf', 'inet'], capture_output=True, text=True, check=True)
-        lines = result.stdout.splitlines()
-        # Skip header lines: find the first line that starts with an IP-like pattern
-        data_start = 0
-        for i, line in enumerate(lines):
-            if line and line[0] in '0123456789' and 'Destination' not in line:
-                data_start = i
-                break
-        for line in lines[data_start:]:
-            columns = line.split()
-            if len(columns) >= 6 and columns[0] == ip and columns[5] != exemptNetif:
-                return True
-        return False
-    except subprocess.CalledProcessError as e:
-        raise ValueError(f"Error running netstat: {e}")
-
-def ConfigureTunnelStaticRoute(instance_obj, wgIp):
-    """
-    If DUAL WAN, some people want to force a gateway, so create/update a static route for the PIA server we're
-    about to connect to, making sure it goes out of the WAN gateway they've configured.
-    """
-    logger.debug("tunnelGateway has been configured, will set up a static route for the PIA tunnel to enforce the outgoing gateway")
-    tunnelGateway = config.get('tunnelGateway')
-    try:
-        request = GetRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/routes/routes/searchRoute/")
-    except ValueError as e:
-        raise ValueError(f"searchRoute - Error message: {str(e)}")
-
-    opnsenseRoutes = json.loads(request.text)['rows']
-    opnsenseRouteUUID = ''
-    for route in opnsenseRoutes:
-        if route['descr'] == instance_obj.WGPeerName:
-            opnsenseRouteUUID = route['uuid']
-            break
-
-    # if the PIA server route can't be found create it
-    routeUpdated = False
-    if opnsenseRouteUUID == '':
-        logger.debug("Creating static route as does not exist")
-        createObject = {
-            "route": {
-                "disabled": '0',
-                "network": wgIp + '/32',
-                "gateway": tunnelGateway,
-                "descr": instance_obj.WGPeerName
-            }
-        }
-        try:
-            request = PostRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/routes/routes/addRoute/", createObject)
-        except ValueError as e:
-            raise ValueError(f"addRoute - Error message: {str(e)}")
-        addRoute = json.loads(request.text)
-        if addRoute['result'] != "saved":
-            raise ValueError(f"addRoute - Error message: {str(addRoute)}")
-        routeUpdated = True
-    else:
-        try:
-            request = GetRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/routes/routes/getRoute/{opnsenseRouteUUID}")
-        except ValueError as e:
-            raise ValueError(f"getRoute - Error message: {str(e)}")
-        currentRoute = json.loads(request.text)
-        currentRoutedIP = currentRoute['route']['network']
-        currentGateway = ''
-        for gateway in currentRoute['route']['gateway']:
-            if currentRoute['route']['gateway'][gateway]['selected'] == 1:
-                currentGateway = gateway
-
-        logger.debug(f"Current Gateway: {str(currentGateway)} - Required Gateway: {str(tunnelGateway)}")
-        logger.debug(f"Current Routed IP: {str(currentRoutedIP)} - Required Routed IP: {wgIp}/32")
-        if currentGateway != tunnelGateway or currentRoutedIP != wgIp + '/32':
-            logger.debug("Static route requires updating")
-            currentRoute['route']['network'] = wgIp + '/32'
-            currentRoute['route']['gateway'] = tunnelGateway
-            currentRoute['route']['disabled'] = '0'
-            try:
-                request = PostRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/routes/routes/setRoute/{opnsenseRouteUUID}", currentRoute)
-            except ValueError as e:
-                raise ValueError(f"setRoute - Error message: {str(e)}")
-            setRoute = json.loads(request.text)
-            if setRoute['result'] != "saved":
-                raise ValueError(f"setRoute - Error message: {str(setRoute)}")
-            routeUpdated = True
-
-    if routeUpdated:
-        createObject = {}
-        try:
-            request = PostRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/routes/routes/reconfigure/", createObject)
-        except ValueError as e:
-            raise ValueError(f"route reconfigure - Error message: {str(e)}")
-        reconfigure = json.loads(request.text)
-        if reconfigure['status'] != "ok":
-            raise ValueError(f"route reconfigure - Error message: {str(reconfigure)}")
-        logger.debug(f"PIA tunnel ip {wgIp} now set to route over WAN gateway {tunnelGateway} via static route")
-
-def PIAAddKey(instance_obj, wgCn, wgIp):
-    """
-    Asks a PIA WireGuard server for our connection information, registering our public key with it.
-    If we're using a DIP we need to authenticate using DIP token, otherwise we use the PIA Token.
-    """
-    if instance_obj.Dip:
-        piaMetaSession = CreateRequestsSession((f"dedicated_ip_{instance_obj.DipToken}", wgIp), None, state.ca)
-        try:
-            request = GetRequest(piaMetaSession, f"https://{wgCn}:1337/addKey", params={"pubkey": instance_obj.WGPubkey})
-        except ValueError as e:
-            raise ValueError(f"addKey DIP - Error message: {str(e)}")
-    else:
-        # PIA's addKey authenticates via the "pt" query parameter
-        piaMetaSession = CreateRequestsSession(None, None, state.ca)
-        try:
-            request = GetRequest(piaMetaSession, f"https://{wgCn}:1337/addKey", params={"pt": state.token, "pubkey": instance_obj.WGPubkey})
-        except ValueError as e:
-            raise ValueError(f"addKey non-DIP - Error message: {str(e)}")
-    return json.loads(request.text)
-
-def InformNewIP(interfaceName):
-    try:
-        subprocess.run(['/usr/local/sbin/configctl', 'interface', 'newip', interfaceName, 'force'], capture_output=True, text=True, check=True)
-        return True
-    except subprocess.CalledProcessError as e:
-        raise ValueError(f"Error executing command: {e}")
-
-def GenerateFakeWGKey():
-    """
-    Generates a placeholder Ed25519-sized public key (32 random bytes, base64 encoded).
-    This is used as a temporary key when creating the peer in OPNsense, before we know
-    the real PIA server key. It gets replaced with the real key on the first setClient call.
-    """
-    key = secrets.token_bytes(32)
-    public_key = base64.b64encode(key).decode('utf-8')
-    return public_key
-
-def piaAuthPayload():
-    """
-    Builds the payload for PIA's global API token endpoint.
-    """
-    return {"username": config['piaUsername'], "password": config['piaPassword']}
-
-def processPortForward(instance_obj, currentEpoch):
-    """
-    Handles port forwarding for a single instance: checks the port signature, requests a new port
-    if needed, refreshes the binding, and updates the OPNsense firewall alias.
-    """
-    if instance_obj.PortForward is False:
-        return
-    if instance_obj.ServerChangeFailed:
-        logger.debug(f"Skipping port forward for tunnel instance {instance_obj.Name}, as its tunnel could not be configured this run")
-        return
-
-    logger.debug(f"Processing port forward for tunnel instance {instance_obj.Name}")
-
-    wireguardSignature = None
-    wireguardServerInfo = None
-    newPortRequired = False
-    portRefresh = False
-    state.token = ""
-
-    getSignatureRequestsSession = CreateRequestsSession(None, None, state.ca)
-
-    # If the server changed this run, the old port is bound to the old server so force a new one
-    if instance_obj.ServerChange:
-        newPortRequired = True
-
-    # first we need to check if we have a port forward signature.
-    if os.path.isfile(instance_obj.PortSignatureFile()):
-        with open(instance_obj.PortSignatureFile(), 'r') as f:
-            wireguardSignature = json.loads(f.read())
-    else:
-        newPortRequired = True
-
-    # get wireguard Server information
-    if os.path.isfile(instance_obj.InfoFile()):
-        with open(instance_obj.InfoFile(), 'r') as f:
-            wireguardServerInfo = json.loads(f.read())
-    else:
-        logger.debug(f"wireguard server information missing for port forward {instance_obj.InfoFile()}")
-        sys.exit(2)
-
-    # PIA don't offer port forwarding in every region, so check the region of the server we're currently connected to
-    # supports it, otherwise the port forward requests will just be refused by the PIA server
-    regionPortForward = wireguardServerInfo.get('region_port_forward')
-    if regionPortForward is None:
-        # Server information file was written before we started recording this, so look the region up and store it.
-        # A DIP's region comes from PIA rather than the config, so if it isn't in the file we can't look it up here,
-        # it'll get recorded the next time the instance changes server.
-        regionId = wireguardServerInfo.get('region_id', '' if instance_obj.Dip else instance_obj.Region)
-        if regionId != '':
-            try:
-                regionPortForward = RegionPortForward(regionId)
-            except ValueError as e:
-                logger.error(f"Failed to get PIA Server List: {str(e)}")
-                sys.exit(1)
-        if regionPortForward is not None:
-            wireguardServerInfo['region_id'] = regionId
-            wireguardServerInfo['region_port_forward'] = regionPortForward
-            with open(instance_obj.InfoFile(), 'w') as filetowrite:
-                filetowrite.write(json.dumps(wireguardServerInfo))
-                logger.debug(f"Saved region port forward support to {instance_obj.InfoFile()}")
-    if regionPortForward is False:
-        logger.warning(f"{instance_obj.Name} has portForward enabled, but PIA region {wireguardServerInfo.get('region_id')} doesn't support port forwarding, so no port will be requested. " +
-        "Either set portForward to false for this instance, or pick a region that supports it (see --listregions)")
-        return
-
-    # store retrieved port in this file, so external services can easily get it
-    if os.path.isfile(instance_obj.WebPortFile()) is False:
-        newPortRequired = True
-        logger.debug("Port not allocated, requesting port")
-
-    # We'll check the expiry of the port, and if it's expired
-    if wireguardSignature is not None and newPortRequired is False:
-        expiryDate = wireguardSignature['expires_at']
-        if '.' in expiryDate:
-            expiryDate = expiryDate.split('.')[0].replace("T", " ").replace("Z", "")
-        port_expiry = datetime.datetime.strptime(expiryDate, '%Y-%m-%d %H:%M:%S')
-        time_between = port_expiry - datetime.datetime.now()
-        logger.debug(f"Days left on port: {str(time_between.days)}")
-        if time_between.days <= 1:  # if we have 1 day to go on the port, we request a new one
-            logger.debug("Port expiring soon, requesting new port")
-            newPortRequired = True
-        secondsDifferent = currentEpoch - wireguardSignature['refresh_epoch']
-        logger.debug(f"last port refresh {str(secondsDifferent)} seconds ago (will refresh when over 599)")
-        if secondsDifferent > 599:
-            portRefresh = True
-            logger.debug("port refresh required")
-
-    # First we need to get a signature, the signature lasts two months, so we only need to get it on serverChange. PIA's server policy for reboots is every 2-3 months anyway
-    # Might be a good idea to set cron to change PIA server every 2 month anyway
-    if newPortRequired:
-        # Port refresh required to schedule the WireGuard server adding the port.
-        portRefresh = True
-        # get a new piatoken if we are renewing the port
-        logger.debug("Getting PIA Auth Token from global API for port forwarding")
-        try:
-            state.token = PIAToken(piaAuthPayload())
-        except ValueError as e:
-            logger.error(f"PIAToken - Error message: {str(e)}")
-            sys.exit(1)
-
-        createObject = {
-            "token": state.token
-        }
-
-        override_dns(wireguardServerInfo['server_name'], wireguardServerInfo['server_vip'])
-        # make a request to the WG server VIP and get our signature
-        try:
-            request = PostRequest(getSignatureRequestsSession, f"https://{wireguardServerInfo['server_name']}:19999/getSignature", createObject)
-        except ValueError as e:
-            logger.error(f"getSignature - Error message: {str(e)}")
-            sys.exit(1)
-        wireguardSignature = json.loads(request.text)
-        logger.debug(f"PIA Signature Port: {request.text}")
-
-        if wireguardSignature['status'] != 'OK':
-            logger.error("wireguardSignature status came back with not OK")
-            sys.exit(2)
-
-        payloadInfo = json.loads(base64.b64decode(wireguardSignature['payload']))
-        logger.debug(f"PayloadInfo {payloadInfo}")
-        wireguardSignature['expires_at'] = payloadInfo['expires_at']
-        wireguardSignature['port'] = payloadInfo['port']
-
-        with open(instance_obj.WebPortFile(), 'w') as filetowrite:
-            filetowrite.write(str(payloadInfo['port']))
-            logger.debug(f"Saved port number to {instance_obj.WebPortFile()}")
-        # written port to file
-
-    # The requested port has a timer that needs to be refreshed to keep the port active.
-    # It must be refreshed at least every 15 minutes.
-    # We'll also update the firewall alias during this step
-    if portRefresh:
-        createObject = {
-            "payload": wireguardSignature['payload'],
-            "signature": wireguardSignature['signature']
-        }
-        override_dns(wireguardServerInfo['server_name'], wireguardServerInfo['server_vip'])
-        # make a request to the WG server VIP and get our signature
-        try:
-            request = PostRequest(getSignatureRequestsSession, f"https://{wireguardServerInfo['server_name']}:19999/bindPort", createObject)
-        except ValueError as e:
-            logger.error(f"bindPort - Error message: {str(e)}")
-            sys.exit(1)
-        wireguardPort = json.loads(request.text)
-        logger.debug(f"PIA Port Request: {request.text}")
-
-        if wireguardPort['status'] != 'OK':
-            if os.path.isfile(instance_obj.WebPortFile()):
-                os.remove(instance_obj.WebPortFile())
-                logger.error("Removed port file because the port refresh no longer returned an ok status, will attempt a new port next time")
-
-        # save required information to file for next time
-        wireguardSignature['refresh_epoch'] = currentEpoch
-        with open(instance_obj.PortSignatureFile(), 'w') as filetowrite:
-            filetowrite.write(json.dumps(wireguardSignature))
-            logger.debug(f"Saved wireguardSignature and payload to {instance_obj.PortSignatureFile()}")
-
-    # If new port then we update the alias
-    if newPortRequired:
-        # check if the PIA port forward alias exists
-        opnsensePiaPortUpdated = False
-        opnsensePiaPortUUID = ''
-        try:
-            request = GetRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/firewall/alias/getAliasUUID/{instance_obj.PiaPortName}")
-        except ValueError as e:
-            logger.error(f"getAliasUUID - Error message: {str(e)}")
-            sys.exit(1)
-        piaPortAlias = json.loads(request.text)
-        if piaPortAlias:
-            opnsensePiaPortUUID = piaPortAlias['uuid']
-
-        # Now we know if it does or does not exist, we can create/update it
-        if opnsensePiaPortUUID == '':
-            createObject = {
-                "alias": {
-                    "enabled": '1',
-                    "name": instance_obj.PiaPortName,
-                    "description": f"PIA Port forwarded, port from WireGuard PIA instance {instance_obj.Name}",
-                    "type": "port",
-                    "content": wireguardSignature['port']
-                    }
-                }
-            try:
-                request = PostRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/firewall/alias/addItem/", createObject)
-            except ValueError as e:
-                logger.error(f"addItem alias - Error message: {str(e)}")
-                sys.exit(1)
-            opnsensePiaPortUpdated = True
-            instance_obj.Port = wireguardSignature['port']
-        else:
-            # get current port alias information, so we can check it's the right port
-            try:
-                request = GetRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/firewall/alias/getItem/{opnsensePiaPortUUID}")
-            except ValueError as e:
-                logger.error(f"getItem alias - Error message: {str(e)}")
-                sys.exit(1)
-            piaPortAlias = json.loads(request.text)
-            currentAliasPort = "0"
-            for port in piaPortAlias['alias']['content']:
-                if piaPortAlias['alias']['content'][port]['selected'] == 1:
-                    currentAliasPort = piaPortAlias['alias']['content'][port]['value']
-
-            logger.debug(f"CurrentPortInAlias: {str(currentAliasPort)}")
-            logger.debug(f"Required Port: {str(wireguardSignature['port'])}")
-            if currentAliasPort != str(wireguardSignature['port']):
-                logger.debug("Ports don't match, correcting the Alias")
-                piaPortAlias['alias']['content'] = wireguardSignature['port']
-                piaPortAlias['alias']['type'] = 'port'
-                piaPortAlias['alias']['counters'] = ''
-                piaPortAlias['alias']['proto'] = ''
-                piaPortAlias['alias']['interface'] = ''
-                keys_to_delete = ['categories', 'authtype']
-                for key in keys_to_delete:
-                    piaPortAlias['alias'].pop(key, None)
-                try:
-                    request = PostRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/firewall/alias/setItem/{opnsensePiaPortUUID}", piaPortAlias)
-                except ValueError as e:
-                    logger.error(f"setItem alias - Error message: {str(e)}")
-                    sys.exit(1)
-                setItem = json.loads(request.text)
-                if setItem['result'] != 'saved':
-                    logger.error(f"setItem alias - Response error message: {str(request.text)}")
-                    sys.exit(1)
-                opnsensePiaPortUpdated = True
-                instance_obj.Port = wireguardSignature['port']
-            else:
-                logger.debug("No port update required in OPNsense")
-
-        # If update reload firewall aliases
-        if opnsensePiaPortUpdated:
-            logger.debug("Applying updated alias changes")
-            createObject = {}
-            try:
-                request = PostRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/firewall/alias/reconfigure", createObject)
-            except ValueError as e:
-                logger.error(f"reconfigure aliases - Error message: {str(e)}")
-                sys.exit(1)
-            reconfigure = json.loads(request.text)
-            if reconfigure['status'] != 'ok':
-                logger.error(f"reconfigure aliases - Error message: {str(reconfigure)}")
-                sys.exit(1)
-
-    logger.debug(f"Finished processing port forward for tunnel instance {instance_obj.Name}")
-
-# Function for DNS override taken from https://stackoverflow.com/a/60751327/3927406
-dns_cache = {}
-# Capture a dictionary of hostname and their IPs to override with
-def override_dns(domain, ip):
-    """
-    Adds dns entry in to dns cache dictionary, which is checked before dns lookup to allow us to override dns
-    """
-    domain = domain.lower()
-    dns_cache[domain] = ip
-prv_getaddrinfo = socket.getaddrinfo
-# Override default socket.getaddrinfo() and pass ip instead of host
-# if override is detected
-
-def new_getaddrinfo(*args):
-    """
-    When address information is looked up, this function is called and will provide an IP from our cache dictionary before looking it up
-    """
-    domain = args[0].lower()
-    if domain in dns_cache:
-        return prv_getaddrinfo(dns_cache[domain], *args[1:])
-    return prv_getaddrinfo(*args)
-socket.getaddrinfo = new_getaddrinfo
-
-class Instance:
-    """
-    Holds the state for one WireGuard tunnel instance from the config file.
-    The constructor pulls the static bits out of the config; the rest of the
-    attributes get populated as the script talks to OPNsense and PIA.
-    """
-    def __init__(self, data, instanceName):
-        self.Name = instanceName
-        self.Region = data['instances'][instanceName]["regionId"]
-        self.DipToken = data['instances'][instanceName]["dipToken"]
-        self.Dip = data['instances'][instanceName]["dip"]
-        self.Port = 0
-        self.PortForward = data['instances'][instanceName]["portForward"]
-        self.WGPort = data['instances'][instanceName]["opnsenseWGPort"]
-        self.WGUUID = ""
-        self.WGPubkey = ""
-        self.WGIP = "192.0.0.2/32"  # needs a netmask, OPNsense rejects bare addresses on server.tunneladdress
-        self.WGGateway = "192.0.0.1"
-        self.WGInstance = ""
-        self.WGInstanceName = f"{data['opnsenseWGPrefixName']}-{instanceName}"
-        self.WGPeerName = f"{self.WGInstanceName}-server"
-        self.WGPeerUUID = ""
-        self.WGPeerSelected = False
-        self.WGPeerPubkey = ""
-        self.WGPeerPort = ""
-        self.PiaPortName = f"{data['opnsenseWGPrefixName']}_{instanceName}_port"
-        self.PiaPortUUID = ""
-        self.RouteUUID = ""
-        self.ServerChange = False
-        self.ServerChangeFailed = False
-        self.PostConfigScript = data['instances'][instanceName].get("postConfigScript", False)
-    def __str__(self):
-        instance_dict = {"Instance": self.WGInstanceName}
-        instance_dict.update(vars(self))
-        return json.dumps(instance_dict)
-    def GatewayFile(self):
-        return f"/tmp/wg{self.WGInstance}_router"
-    def InfoFile(self):
-        return f"/tmp/wg{self.WGInstance}_piaserverinfo"
-    def PortSignatureFile(self):
-        return f"/tmp/wg{self.WGInstance}_piaportforwardsignature"
-    def WebPortFile(self):
-        return f"/usr/local/www/wg{self.WGInstance}_port.txt"
-
-
-class State:
-    serverList = 'https://serverlist.piaservers.net/vpninfo/servers/v6'
-    tokenApi = 'https://www.privateinternetaccess.com/api/client/v2/token'
-    dedicatedIpApi = 'https://www.privateinternetaccess.com/api/client/v2/dedicated_ip'
-    token = ''
-    ca = os.path.join(sys.path[0], "ca.rsa.4096.crt")
-    port = ''
-    portSignature = ''
-    metaCn = ''
-    metaIp = ''
-    wgCn = ''
-    wgIp = ''
-    wgCandidates = []
-    regionId = ''
-    regionPortForward = None
-
-    @classmethod
-    def reset(cls):
-        cls.port = ''
-        cls.portSignature = ''
-        cls.metaCn = ''
-        cls.metaIp = ''
-        cls.wgCn = ''
-        cls.wgIp = ''
-        cls.wgCandidates = []
-        cls.regionId = ''
-        cls.regionPortForward = None
-
-# PIA's WireGuard servers use self-signed certs with a SAN, so we verify against their CA cert
-# directly (state.ca). The REQUESTS_CA_BUNDLE env var, if set by OPNsense, would override our
-# per-session verify setting, so we remove it to ensure our custom SSL context takes effect.
-if 'REQUESTS_CA_BUNDLE' in os.environ:
-    del os.environ['REQUESTS_CA_BUNDLE']
-
-# Configure the logging module
+UA = 'Github: FingerlessGlov3s/OPNsensePIAWireguard'
+CA = os.path.join(sys.path[0], "ca.rsa.4096.crt")
 logging.basicConfig(format='%(asctime)s %(levelname)s:%(message)s', datefmt='%Y-%m-%d %H:%M:%S', level=logging.INFO, stream=sys.stdout)
 logger = logging.getLogger("PIAWireGuard")
+if 'REQUESTS_CA_BUNDLE' in os.environ: del os.environ['REQUESTS_CA_BUNDLE']
 
-# Global state shared across all instances. We use the class itself (not an instance)
-# so that all instances see the same serverList, token, etc. without passing it around.
-state = State
+# Module-level state
+config = None
+osess = None
+_cache = None
 
-#
-# Main execution
-#
-if __name__ == '__main__':
+def _init_osess():
+    global osess
+    osess = sess((config['opnsenseKey'], config['opnsenseSecret']), None, False)
 
-    # Create an argument parser
-    parser = argparse.ArgumentParser(description="Python script to automate connections to PIA's WireGuard Servers. Source: https://github.com/FingerlessGlov3s/OPNsensePIAWireguard")
-    parser.add_argument('--debug', action='store_true', help='Enable debug logging')
-    parser.add_argument('--listregions', action='store_true', help='List available regions and their properties')
-    parser.add_argument('--changeserver', metavar='instancename', nargs='?', help='Change server for instance name or "all" for all instances')
-    args = parser.parse_args()
+# --- SSL (PIA uses self-signed certs) ---
+def _ssl_ctx(verify=True):
+    c = ssl.create_default_context()
+    c.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    if not verify:
+        c.check_hostname = False
+        c.verify_mode = ssl.CERT_NONE
+    return c
 
-    # Update the logging level based on the debug argument
-    if args.debug:
-        logging.getLogger().setLevel(logging.DEBUG)
+class _S(HTTPAdapter):
+    def __init__(self, ctx=None, **kw):
+        self.ctx = ctx
+        super().__init__(**kw)
+    def init_poolmanager(self, *a, **kw):
+        kw['ssl_context'] = self.ctx
+        return super().init_poolmanager(*a, **kw)
 
-    # Import our config file
+def sess(auth=None, hdrs=None, verify=True):
+    s = requests.Session()
+    s.mount('https://', _S(ctx=_ssl_ctx(verify)))
+    s.auth = auth
+    s.headers.update({'User-Agent': UA, **(hdrs or {})})
+    s.verify = verify
+    if not verify:
+        urllib3.disable_warnings()
+    return s
+
+# --- HTTP ---
+def req(s, method, url, data=None, params=None, timeout=10):
+    r = s.request(method, url, json=data, params=params, timeout=timeout)
+    if r.status_code == 401: raise ValueError("unauthorized")
+    if r.status_code != 200: raise ValueError(f"HTTP {r.status_code}: {r.text}")
+    return r
+
+def oget(path):
+    return json.loads(req(osess, 'GET', f"{config['opnsenseURL']}{path}").text)
+
+def opost(path, data):
+    return json.loads(req(osess, 'POST', f"{config['opnsenseURL']}{path}", data=data).text)
+
+# --- Config ---
+def _dk(pairs):
+    d = {}
+    for k, v in pairs:
+        if k in d: raise ValueError(f"dup key: {k}")
+        d[k] = v
+    return d
+
+def validate(d):
+    global config
+    config = d
+    R = ["opnsenseURL","opnsenseKey","opnsenseSecret","piaUsername","piaPassword","opnsenseWGPrefixName","instances"]
+    for k in R:
+        if k not in d: raise ValueError(f"Missing: {k}")
+    for k in ["opnsenseKey","piaUsername","piaPassword","opnsenseWGPrefixName"]:
+        v = d.get(k, "")
+        if not isinstance(v, str) or not v.strip(): raise ValueError(f"'{k}' must be non-blank string")
+    if not re.match(r'^[a-zA-Z0-9_]+$', d['opnsenseWGPrefixName']):
+        raise ValueError(f"Bad prefix: '{d['opnsenseWGPrefixName']}'")
+    tg = d.get("tunnelGateway")
+    if tg is not None and (not isinstance(tg, str) or not tg.strip()):
+        raise ValueError("'tunnelGateway' must be null or non-blank")
+    for k in d:
+        if k not in R and k != "tunnelGateway":
+            logger.warning(f"Unknown config key '{k}'")
+    insts = d.get("instances", {})
+    if not isinstance(insts, dict) or not 1 <= len(insts) <= 10:
+        raise ValueError("Bad 'instances'")
+    IR = ["regionId","dipToken","dip","portForward","opnsenseWGPort"]
+    ports = set()
+    for n, i in insts.items():
+        if not re.match(r'^[a-zA-Z0-9_]+$', n): raise ValueError(f"Bad instance name '{n}'")
+        if not isinstance(i, dict): raise ValueError(f"Bad instance '{n}'")
+        for p in IR:
+            if p not in i: raise ValueError(f"Missing '{p}' in '{n}'")
+        for p in i:
+            if p not in IR and p != "postConfigScript": raise ValueError(f"Unknown prop '{p}' in '{n}'")
+        if not isinstance(i["regionId"], str) or not i["regionId"].strip(): raise ValueError(f"'regionId' in '{n}'")
+        if not isinstance(i["dip"], bool): raise ValueError(f"'dip' in '{n}' must be bool")
+        if not isinstance(i["portForward"], bool): raise ValueError(f"'portForward' in '{n}' must be bool")
+        ps = i.get("postConfigScript")
+        if ps and (not isinstance(ps, str) or not ps.strip()): raise ValueError(f"'postConfigScript' in '{n}'")
+        w = i.get("opnsenseWGPort", "")
+        if not (isinstance(w, str) and w.isdigit() and 1 <= int(w) <= 65535): raise ValueError(f"'opnsenseWGPort' in '{n}' must be 1-65535")
+        if w in ports: raise ValueError(f"Duplicate port '{w}' in '{n}'")
+        ports.add(w)
+
+# --- PIA API ---
+def pia_token():
+    r = requests.post("https://www.privateinternetaccess.com/api/client/v2/token",
+                       headers={'User-Agent': UA, 'Content-Type': 'application/json'},
+                       data=json.dumps({"username": config['piaUsername'], "password": config['piaPassword']}), timeout=10)
+    if r.status_code != 200: raise ValueError(f"PIA token HTTP {r.status_code}")
+    return json.loads(r.text)['token']
+
+def pia_regions():
     try:
-        configFile = os.path.join(sys.path[0], "PIAWireguard.json")
-        if os.path.isfile(configFile):
-            with open(configFile, 'r') as f:
-                config = json.loads(f.read(), object_pairs_hook=CheckForDupKey)
-        else:
-            logger.error(f"Failed to find config file {configFile}")
-            sys.exit(1)
-    except ValueError as e:
-        logger.error(f"Failed to import config file {configFile} error: {str(e)}")
-        sys.exit(1)
+        r = requests.get("https://serverlist.piaservers.net/vpninfo/servers/v6", headers={'User-Agent': UA}, timeout=15)
+        if r.status_code != 200: raise ValueError(f"HTTP {r.status_code}")
+        return json.loads(r.text.split('\n')[0])['regions']
+    except (ValueError, requests.exceptions.RequestException) as e:
+        raise ValueError(f"PIA regions: {e}")
 
-        # Check if user wanted to list regions, and if so display them
-    # (listregions only needs the PIA server list URL, so we skip full config validation)
+def regions():
+    global _cache
+    if _cache is None: _cache = pia_regions()
+    return _cache
+
+def region_pf(rid):
+    for r in regions():
+        if r['id'] == rid: return r.get('port_forward')
+    return None
+
+# --- DNS override (PIA WG servers use hostname certs) ---
+_dnsc = {}
+_gai = socket.getaddrinfo
+def dns(domain, ip):
+    _dnsc[domain.lower()] = ip
+def _gai2(*a):
+    d = a[0].lower()
+    if d in _dnsc: return _gai(_dnsc[d], *a[1:])
+    return _gai(*a)
+socket.getaddrinfo = _gai2
+
+# --- Instance ---
+class Inst:
+    def __init__(self, name):
+        i = config['instances'][name]
+        p = config['opnsenseWGPrefixName']
+        self.__dict__.update({
+            "Name": name, "Region": i["regionId"], "DipToken": i["dipToken"], "Dip": i["dip"],
+            "token": "", "Port": 0, "PortForward": i["portForward"], "WGPort": i["opnsenseWGPort"],
+            "WGUUID": "", "WGPubkey": "", "WGIP": "192.0.0.2/32", "WGGateway": "192.0.0.1",
+            "WGInstance": "", "WGInstanceName": f"{p}-{name}", "WGPeerName": f"{p}-{name}-server",
+            "WGPeerUUID": "", "WGPeerPubkey": "",
+            "PiaPortName": f"{p}_{name}_port", "ServerChange": False, "ServerChangeFailed": False,
+            "PostConfigScript": i.get("postConfigScript", False),
+            "wgCn": "", "wgIp": "", "wgCands": [], "metaCn": "", "metaIp": "",
+            "regionId": "", "regionPF": None,
+        })
+    def __str__(self): return json.dumps({"Instance": self.WGInstanceName, **vars(self)})
+    def gwFile(self):    return f"/tmp/wg{self.WGInstance}_router"
+    def infoFile(self):  return f"/tmp/wg{self.WGInstance}_piaserverinfo"
+    def sigFile(self):   return f"/tmp/wg{self.WGInstance}_piaportforwardsignature"
+    def portFile(self):  return f"/usr/local/www/wg{self.WGInstance}_port.txt"
+
+# --- Helpers ---
+def fake_key(): return base64.b64encode(secrets.token_bytes(32)).decode()
+
+def new_ip(iface):
+    subprocess.run(['/usr/local/sbin/configctl', 'interface', 'newip', iface, 'force'], capture_output=True, check=True)
+
+def ip_in_routes(ip, exempt):
+    out = subprocess.run(['netstat', '-rWnf', 'inet'], capture_output=True, text=True, check=True).stdout.splitlines()
+    s = next((i for i, l in enumerate(out) if l and l[0] in '0123456789' and 'Destination' not in l), 0)
+    for l in out[s:]:
+        c = l.split()
+        if len(c) >= 6 and c[0] == ip and c[5] != exempt: return True
+    return False
+
+def add_key(inst, cn, ip):
+    auth = (f"dedicated_ip_{inst.DipToken}", ip) if inst.Dip else None
+    params = {"pubkey": inst.WGPubkey} if inst.Dip else {"pt": inst.token, "pubkey": inst.WGPubkey}
+    s = sess(auth, None, CA)
+    return json.loads(req(s, 'GET', f"https://{cn}:1337/addKey", params=params).text)
+
+def static_route(inst, ip):
+    tg = config.get('tunnelGateway')
+    routes = oget('/api/routes/routes/searchRoute/')['rows']
+    uid = next((r['uuid'] for r in routes if r['descr'] == inst.WGPeerName), '')
+    upd = False
+    if uid == '':
+        res = opost('/api/routes/routes/addRoute/', {"route": {"disabled":'0','network':ip+'/32','gateway':tg,'descr':inst.WGPeerName}})
+        if res['result'] != "saved": raise ValueError(f"addRoute: {res}")
+        upd = True
+    else:
+        cur = oget(f"/api/routes/routes/getRoute/{uid}")
+        cip = cur['route']['network']
+        cgw = next((g for g in cur['route']['gateway'] if cur['route']['gateway'][g]['selected']==1), '')
+        if cgw != tg or cip != ip+'/32':
+            cur['route'].update(network=ip+'/32', gateway=tg, disabled='0')
+            res = opost(f"/api/routes/routes/setRoute/{uid}", cur)
+            if res['result'] != "saved": raise ValueError(f"setRoute: {res}")
+            upd = True
+    if upd:
+        res = opost('/api/routes/routes/reconfigure/', {})
+        if res['status'] != "ok": raise ValueError(f"route reconfig: {res}")
+        logger.debug(f"Route {ip} via {tg}")
+
+# --- Port forward ---
+def port_forward(inst, epoch):
+    if not inst.PortForward: return
+    if inst.ServerChangeFailed:
+        logger.debug(f"Port forward skipped for {inst.Name} (no tunnel change)")
+        return
+    logger.debug(f"Port forward for {inst.Name}")
+    sf, if_, pf = inst.sigFile(), inst.infoFile(), inst.portFile()
+    sig = json.load(open(sf)) if os.path.isfile(sf) else None
+    info = json.load(open(if_)) if os.path.isfile(if_) else None
+    if info is None:
+        logger.debug(f"Server info missing: {if_}")
+        sys.exit(2)
+    new_port = inst.ServerChange or sig is None
+    rpf = info.get('region_port_forward')
+    if rpf is None:
+        rid = info.get('region_id', '' if inst.Dip else inst.Region)
+        if rid:
+            try: rpf = region_pf(rid)
+            except ValueError as e:
+                logger.error(f"PIA regions: {e}"); sys.exit(1)
+        if rpf is not None:
+            info.update(region_id=rid, region_port_forward=rpf)
+            json.dump(info, open(if_,'w'))
+    if rpf is False:
+        logger.warning(f"{inst.Name}: portForward on but region {info.get('region_id')} doesn't support it")
+        return
+    if not os.path.isfile(pf):
+        new_port = True; logger.debug("No port yet")
+    refresh = False
+    if sig and not new_port:
+        e = sig['expires_at']
+        if '.' in e: e = e.split('.')[0].replace("T"," ").replace("Z","")
+        delta = datetime.datetime.strptime(e, '%Y-%m-%d %H:%M:%S') - datetime.datetime.now()
+        logger.debug(f"Port expires in {delta.days}d")
+        if delta.days <= 1: new_port = True
+        if epoch - sig['refresh_epoch'] > 599: refresh = True; logger.debug("Port refresh >599s")
+    else:
+        refresh = False
+    gs = sess(None, None, CA)
+    if new_port:
+        refresh = True
+        logger.debug("Getting PIA token for port forward")
+        try: tok = pia_token()
+        except ValueError as e:
+            logger.error(f"PIAToken: {e}"); sys.exit(1)
+        dns(info['server_name'], info['server_vip'])
+        try:
+            sig = json.loads(req(gs, 'POST', f"https://{info['server_name']}:19999/getSignature", data={"token": tok}).text)
+        except ValueError as e:
+            logger.error(f"getSignature: {e}"); sys.exit(1)
+        if sig['status'] != 'OK':
+            logger.error("getSignature != OK"); sys.exit(2)
+        pl = json.loads(base64.b64decode(sig['payload']))
+        sig['expires_at'] = pl['expires_at']; sig['port'] = pl['port']
+        open(pf,'w').write(str(pl['port']))
+        logger.debug(f"Port {pl['port']} -> {pf}")
+    if refresh:
+        dns(info['server_name'], info['server_vip'])
+        try:
+            bind = json.loads(req(gs, 'POST', f"https://{info['server_name']}:19999/bindPort", data={"payload":sig['payload'],"signature":sig['signature']}).text)
+        except ValueError as e:
+            logger.error(f"bindPort: {e}"); sys.exit(1)
+        if bind['status'] != 'OK' and os.path.isfile(pf):
+            os.remove(pf); logger.error("Removed port file (bindPort != OK)")
+        sig['refresh_epoch'] = epoch
+        json.dump(sig, open(sf,'w'))
+    if new_port:
+        au = oget(f"/api/firewall/alias/getAliasUUID/{inst.PiaPortName}")
+        auid = au['uuid'] if au else ''
+        aupd = False
+        if auid == '':
+            opost('/api/firewall/alias/addItem/', {"alias":{"enabled":'1',"name":inst.PiaPortName,"description":f"PIA PF {inst.Name}","type":"port","content":sig['port']}})
+            aupd = True; inst.Port = sig['port']
+        else:
+            cur = oget(f"/api/firewall/alias/getItem/{auid}")
+            cp = next((v['value'] for v in cur['alias']['content'].values() if v['selected']==1), "0")
+            if cp != str(sig['port']):
+                cur['alias'].update(content=sig['port'], type='port', counters='', proto='', interface='')
+                for k in ['categories','authtype']: cur['alias'].pop(k, None)
+                res = opost(f"/api/firewall/alias/setItem/{auid}", cur)
+                if res['result'] != 'saved':
+                    logger.error(f"setItem alias: {res}"); sys.exit(1)
+                aupd = True; inst.Port = sig['port']
+        if aupd:
+            res = opost('/api/firewall/alias/reconfigure', {})
+            if res['status'] != 'ok':
+                logger.error(f"alias reconfig: {res}"); sys.exit(1)
+            logger.debug("Firewall aliases updated")
+    logger.debug(f"Port forward done for {inst.Name}")
+
+# --- Main ---
+if __name__ == '__main__':
+    ap = argparse.ArgumentParser(description="PIA WireGuard for OPNsense")
+    ap.add_argument('--debug', action='store_true')
+    ap.add_argument('--listregions', action='store_true')
+    ap.add_argument('--changeserver', metavar='inst', nargs='?', help='Instance name or "all"')
+    args = ap.parse_args()
+    if args.debug: logging.getLogger().setLevel(logging.DEBUG)
+
+    cfgf = os.path.join(sys.path[0], "PIAWireguard.json")
+    if not os.path.isfile(cfgf):
+        logger.error(f"Config not found: {cfgf}"); sys.exit(1)
+    with open(cfgf) as f:
+        validate(json.loads(f.read(), object_pairs_hook=_dk))
+    logger.debug("Config OK")
+
     if args.listregions:
         try:
-            r = requests.get(state.serverList, headers={'User-Agent': USER_AGENT}, timeout=15)
+            r = requests.get("https://serverlist.piaservers.net/vpninfo/servers/v6", headers={'User-Agent': UA}, timeout=15)
         except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to reach PIA server list: {e}")
-            sys.exit(2)
+            logger.error(f"PIA regions: {e}"); sys.exit(2)
         if r.status_code != 200:
-            logger.error(f"Failed to get PIA server list, URL returned HTTP {r.status_code}. Is there a connectivity issue?")
-            sys.exit(2)
-        piaRegions = json.loads(r.text.split('\n')[0])['regions']
-        regionList = []
-        for region in piaRegions:
-            regionList.append(f"{region['name']} | ID: {region['id']} | Port forwarding: {region['port_forward']} | Geo-located: {region['geo']}")
-        regionList.sort()  # PIA's payload isn't sorted by region name
-        for region in regionList:
-            logger.info(region)
-        logger.info("* Geo-located means these servers are not physically located in the region where the exit node is located. "
-                    "The implementation of geo-located servers has provided us VPN services in countries where service may not "
-                    "have been previously available due to restrictions, government legislation, or a lack of secure server providers.")
-        # Info from https://www.privateinternetaccess.com/helpdesk/kb/articles/geo-located-servers-we-offer
+            logger.error(f"PIA regions HTTP {r.status_code}"); sys.exit(2)
+        for x in sorted(f"{x['name']} | {x['id']} | PF:{x['port_forward']} | Geo:{x['geo']}" for x in json.loads(r.text.split('\n')[0])['regions']):
+            logger.info(x)
+        logger.info("* Geo-located = not physically in exit region")
         sys.exit(0)
 
-    # Validate our config (only reached if not --listregions)
-    try:
-        validate_json(config)
-        logger.debug("JSON validation successful.")
-    except ValueError as e:
-        logger.error(f"JSON validation failed: {str(e)}")
-        sys.exit(1)
+    _init_osess()
 
-    opnsenseRequestsSession = CreateRequestsSession((config['opnsenseKey'], config['opnsenseSecret']), None, False)
-    try:
-        logger.debug("Getting OPNsense WireGuard Instances")
-        request = GetRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/wireguard/server/searchServer/")
-    except ValueError as e:
-        logger.error(f"Failed to list OPNsense WG Instances - Error message: {str(e)}")
-        sys.exit(1)
-
-    logger.debug("Creating/Populating Wireguard Instances array")
-    wireguardInstances = json.loads(request.text)['rows']
-    instances_array = []
-    for instance_name in config.get('instances', {}):
-        logger.debug(f"Setting up python script for instance {instance_name}")
-        instance_obj = Instance(config, instance_name)
-        logger.debug(f"Looking for server instance {instance_obj.WGInstanceName} in gathered opnsense instances")
-        for wireguardInstance in wireguardInstances:
-            if wireguardInstance['name'] == instance_obj.WGInstanceName:
-                instance_obj.WGUUID = wireguardInstance['uuid']
-                instance_obj.WGPubkey = wireguardInstance['pubkey'].replace("=\n\n\n", '=')
+    # Build instance array
+    wg_rows = oget('/api/wireguard/server/searchServer/')['rows']
+    arr = []
+    for name in config.get('instances', {}):
+        inst = Inst(name)
+        for wg in wg_rows:
+            if wg['name'] == inst.WGInstanceName:
+                inst.WGUUID = wg['uuid']
+                inst.WGPubkey = wg['pubkey'].replace("=\n\n\n", '=')
                 break
-
-        if instance_obj.WGUUID == "":
-            logger.debug(f"{instance_obj.Name} tunnel instance missing in OPNsense, will create it.")
-            logger.debug("Generating KeyPair.")
-            try:
-                request = GetRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/wireguard/server/keyPair/")
-            except ValueError as e:
-                logger.error(f"KeyPair - Error message: {str(e)}")
-                sys.exit(1)
-
-            keyPair = json.loads(request.text)
-            if keyPair['status'] != "ok":
-                logger.error("keyPair response non ok status - trying to generate wireGuard key pair")
-                sys.exit(2)
-
-            logger.debug("Adding new WireGuard instance (server)")
-            instance_obj.WGPubkey = keyPair['pubkey']
-            createObject = {
-                "server": {
-                    "enabled": '0',
-                    "name": instance_obj.WGInstanceName,
-                    "pubkey": keyPair['pubkey'],
-                    "privkey": keyPair['privkey'],
-                    "port": instance_obj.WGPort,
-                    "tunneladdress": instance_obj.WGIP,
-                    "disableroutes": '1',
-                    "gateway": instance_obj.WGGateway
-                    }
-            }
-
-            try:
-                request = PostRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/wireguard/server/addServer/", createObject)
-            except ValueError as e:
-                logger.error(f"Add Instance (server) - Error message: {str(e)}")
-                sys.exit(1)
-            addServer = json.loads(request.text)
-            if addServer['result'] != 'saved':
-                logger.error(f"WireGuard creating Instance (server) - failed to add {json.dumps(addServer)}")
-                sys.exit(1)
-            instance_obj.WGUUID = addServer['uuid']
-
-        logger.debug(f"Getting WireGuard instance for {instance_obj.Name}")
-        try:
-            request = GetRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/wireguard/server/getServer/{instance_obj.WGUUID}")
-        except ValueError as e:
-            logger.error(f"WireGuard instance - Error message: {str(e)}")
-            sys.exit(1)
-
-        wireguardInstanceInfo = json.loads(request.text)['server']
-        instance_obj.WGInstance = wireguardInstanceInfo["instance"]
-        instance_obj.WGGateway = wireguardInstanceInfo["gateway"]
-        for peer in wireguardInstanceInfo['peers']:
-            if wireguardInstanceInfo['peers'][peer]['selected'] == 1:
-                instance_obj.WGPeerUUID = peer
-
-        if instance_obj.WGPeerUUID == '':
-            logger.debug("Creating missing peer (PIA's Server)")
-            createObject = {
-                "client": {
-                    "enabled": '1',
-                    "name": instance_obj.WGPeerName,
-                    "pubkey": GenerateFakeWGKey(), # placeholder key
-                    "tunneladdress": "0.0.0.0/0",
-                    "keepalive": '25',
-                    "servers": instance_obj.WGUUID
-                }
-            }
-            try:
-                request = PostRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/wireguard/client/addClient/", createObject)
-            except ValueError as e:
-                logger.error(f"WireGuard creating peer - Error message: {str(e)}")
-                sys.exit(1)
-            addClient = json.loads(request.text)
-            if addClient['result'] != 'saved':
-                logger.error(f"WireGuard creating peer - failed to add {json.dumps(addClient)}")
-                sys.exit(1)
-            instance_obj.WGPeerUUID = addClient['uuid']
+        if not inst.WGUUID:
+            kp = oget('/api/wireguard/server/keyPair/')
+            if kp['status'] != "ok":
+                logger.error(f"keyPair: {kp}"); sys.exit(2)
+            inst.WGPubkey = kp['pubkey']
+            res = opost('/api/wireguard/server/addServer/', {"server":{"enabled":'0',"name":inst.WGInstanceName,"pubkey":kp['pubkey'],"privkey":kp['privkey'],"port":inst.WGPort,"tunneladdress":inst.WGIP,"disableroutes":'1',"gateway":inst.WGGateway}})
+            if res['result'] != 'saved':
+                logger.error(f"addServer: {res}"); sys.exit(1)
+            inst.WGUUID = res['uuid']
+        wg_info = oget(f"/api/wireguard/server/getServer/{inst.WGUUID}")['server']
+        inst.WGInstance = wg_info["instance"]
+        inst.WGGateway = wg_info["gateway"]
+        for peer in wg_info['peers']:
+            if wg_info['peers'][peer]['selected'] == 1: inst.WGPeerUUID = peer
+        if not inst.WGPeerUUID:
+            res = opost('/api/wireguard/client/addClient/', {"client":{"enabled":'1',"name":inst.WGPeerName,"pubkey":fake_key(),"tunneladdress":"0.0.0.0/0","keepalive":'25',"servers":inst.WGUUID}})
+            if res['result'] != 'saved':
+                logger.error(f"addClient: {res}"); sys.exit(1)
+            inst.WGPeerUUID = res['uuid']
         else:
-            logger.debug("Getting peer details (PIA's Server)")
-            try:
-                request = GetRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/wireguard/client/getClient/{instance_obj.WGPeerUUID}")
-            except ValueError as e:
-                logger.error(f"getClient - Error message: {str(e)}")
-                sys.exit(1)
+            inst.WGPeerPubkey = oget(f"/api/wireguard/client/getClient/{inst.WGPeerUUID}")['client']['pubkey'].replace("=\n\n\n", '=')
+        arr.append(inst)
 
-            # Update payload and remove unneeded bits
-            wireguardPeerInstanceInfo = json.loads(request.text)['client']
-            instance_obj.WGPeerPubkey = wireguardPeerInstanceInfo['pubkey'].replace("=\n\n\n", '=')
+    # Handshakes
+    peers = oget('/api/wireguard/service/show/')["rows"]
+    epoch = int(time.time())
+    for inst in arr:
+        for p in peers:
+            if p['public-key'] == inst.WGPeerPubkey:
+                d = epoch if p['latest-handshake'] is None else epoch - p['latest-handshake']
+                if d > 190: inst.ServerChange = True; logger.debug(f"{inst.Name} down ({d}s)")
+                elif args.changeserver in (inst.Name, 'all'): inst.ServerChange = True; logger.debug(f"{inst.Name} forced")
+                else: inst.ServerChange = False; logger.debug(f"{inst.Name} up ({d}s)")
+        if not inst.ServerChange and not os.path.isfile(inst.gwFile()):
+            inst.ServerChange = True; logger.debug(f"{inst.Name} gw file missing")
 
-        logger.debug(f"Finished getting {instance_name} tunnel instance information from OPNsense")
-
-        instances_array.append(instance_obj)
-
-    logger.debug("Checking handshakes")
-    try:
-        request = GetRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/wireguard/service/show/")
-    except ValueError as e:
-        logger.error(f"Getting handshakes - Error message: {str(e)}")
-        sys.exit(1)
-
-    # Workout which tunnels need to change server, if requested or handshake too old
-    currentEpoch = int(time.time())
-    peers = json.loads(request.text)["rows"]
-    for instance_obj in instances_array:
-        for peer in peers:
-            if peer['public-key'] == instance_obj.WGPeerPubkey:
-                # A peer that has never completed a handshake reports a null timestamp, treat that as long ago
-                lastHandshake = peer['latest-handshake']
-                if lastHandshake is None:
-                    secondsDifferent = currentEpoch
-                else:
-                    secondsDifferent = currentEpoch - lastHandshake
-                if secondsDifferent > 190:
-                    logger.debug(f"{instance_obj.Name} tunnel down - last handshake {str(secondsDifferent)} seconds ago")
-                    instance_obj.ServerChange = True
-                elif args.changeserver == instance_obj.Name or args.changeserver == 'all':
-                    logger.debug(f"{instance_obj.Name} tunnel forced change server requested")
-                    instance_obj.ServerChange = True
-                else:
-                    logger.debug(f"{instance_obj.Name} tunnel up - last handshake {str(secondsDifferent)} seconds ago")
-                    instance_obj.ServerChange = False
-        if instance_obj.ServerChange is False and os.path.isfile(instance_obj.GatewayFile()) is False:
-            logger.debug(f"{instance_obj.Name} tunnel gateway file missing, change server requested")
-            instance_obj.ServerChange = True
-
-    # Gateway IPs we've committed to a tunnel during this run. The routing table check below only sees a gateway once
-    # OPNsense has actually applied it, so we track them here too, otherwise a later instance could pick the same one.
-    assignedVips = set()
-
-    # Populate PIA server list
-    serverList = None
-    if any(instance_obj.ServerChange for instance_obj in instances_array):
-        try:
-            GetServerList()
+    if any(i.ServerChange for i in arr):
+        try: regions()
         except ValueError as e:
-            logger.debug(f"Failed to get PIA Server List: {str(e)}")
-            sys.exit(1)
+            logger.error(f"PIA regions: {e}"); sys.exit(1)
 
-    # Get PIA API Token if needed for DIP
-    for instance_obj in instances_array:
-        if instance_obj.ServerChange is False:
-            continue
-        if instance_obj.Dip:
-            logger.debug("Getting PIA Auth Token as required for DIP")
-            try:
-                piaToken = PIAToken(piaAuthPayload())
+    # DIP token (once)
+    dip_s = None
+    for inst in arr:
+        if inst.ServerChange and inst.Dip:
+            try: tok = pia_token()
             except ValueError as e:
-                logger.error(f"Failed to get PIA Token: {str(e)}")
-                sys.exit(1)
-            piaAuthHeaders = {
-                "Authorization": f"Token {piaToken}",
-                "content-type": "application/json"
-            }
-            dipSession = CreateRequestsSession(None, piaAuthHeaders, "/usr/local/share/certs/ca-root-nss.crt")
-            break # Only need one set of details
-
-    # Now we process each instance that needs the server changing
-    for instance_obj in instances_array:
-        if instance_obj.ServerChange is False:
-            continue
-        logger.debug(f"Changing server for tunnel instance {instance_obj.Name}")
-
-        # Clear state
-        state.reset()
-        # If DIP we need to authenticate with the PIA global API and get the DIP info.
-        # First we authenticate, then we ask the DIP API for its details.
-        if instance_obj.Dip:
-            logger.debug("Gathering DIP Details")
-            piaDip = {
-                "tokens": [instance_obj.DipToken]
-            }
-            logger.debug("Gathering PIA DIP Details")
-            try:
-                request = PostRequest(dipSession, state.dedicatedIpApi, piaDip)
-            except ValueError as e:
-                logger.debug(f"Failed to get DIP Details: {str(e)}")
-                sys.exit(1)
-            dipDetails = json.loads(request.text)[0]
-            logger.debug(f"Dip Details: {dipDetails}")
-            if dipDetails['status'] != "active":
-                logger.error("PIA DIP isn't active")
-                sys.exit(2)
-
-            state.wgCn = dipDetails['cn']
-            state.wgIp = dipDetails['ip']
-            # A DIP is one fixed server, so there's only ever the one to try
-            state.wgCandidates = [{'cn': dipDetails['cn'], 'ip': dipDetails['ip']}]
-
-            # The DIP will belong to a region, so we need to find current region's meta server from the global server list.
-            for region in serverList:
-                if region['id'] == dipDetails['id']:
-                    state.metaCn = region['servers']['meta'][0]['cn']
-                    state.metaIp = region['servers']['meta'][0]['ip']
-                    state.regionId = region['id']
-                    state.regionPortForward = region.get('port_forward')
-                    break
-
-            # couldn't find region, make sure the piaRegionId is set correctly
-            if state.metaCn == '':
-                logger.error("region not found in serverlist for DIP, is there an issue with the DIP?")
-                sys.exit(2)
-        else:
-            # Look for a pia server in the region we want.
-            # PIA give us a handful of servers per region, which they consider to be the current best ones.
-            # We take the first one, but keep the rest so we can fall back to them if the gateway IP we're given clashes
-            # with another tunnel.
-            for region in serverList:
-                if region['id'] == instance_obj.Region:
-                    state.metaCn = region['servers']['meta'][0]['cn']
-                    state.metaIp = region['servers']['meta'][0]['ip']
-                    state.wgCandidates = region['servers']['wg']
-                    state.regionId = region['id']
-                    state.regionPortForward = region.get('port_forward')
-                    break
-
-            # couldn't find region, make sure the piaRegionId is set correctly
-            if state.metaCn == '':
-                logger.error(f"region {instance_obj.Region} not found, is the correct region set for the instance")
-                sys.exit(2)
-
-        # PIA didn't give us any wireguard servers to try for this region
-        if len(state.wgCandidates) == 0:
-            logger.error(f"{instance_obj.Name} - PIA didn't list any WireGuard servers for region {state.regionId}, will try again next time")
-            instance_obj.ServerChangeFailed = True
-            continue
-
-        state.wgCn = state.wgCandidates[0]['cn']
-        state.wgIp = state.wgCandidates[0]['ip']
-
-        logger.debug(f"metaServer: {state.metaCn} {state.metaIp}")
-        logger.debug(f"wgServer: {state.wgCn} {state.wgIp}")
-
-        # PIA don't offer port forwarding in every region, so don't ask this region's servers for a port if it isn't supported
-        if instance_obj.PortForward and state.regionPortForward is False:
-            logger.warning(f"{instance_obj.Name} has portForward enabled, but PIA region {state.regionId} doesn't support port forwarding, so no port will be requested. " +
-            "Either set portForward to false for this instance, or pick a region that supports it (see --listregions)")
-            instance_obj.PortForward = False
-
-        # If non DIP get auth token from global API
-        if instance_obj.Dip == False:
-            # Get PIA token from global API - Tokens last 24 hours, so we can make our requests for WG connection information and port if required
-            logger.debug("Getting PIA Auth Token from global API")
-            try:
-                state.token = PIAToken(piaAuthPayload())
-            except ValueError as e:
-                logger.error(f"PIAToken - Error message: {str(e)}")
-                sys.exit(1)
-
-            logger.debug(f"Your PIA Token, DO NOT GIVE THIS TO ANYONE: {state.token}")
-
-        # Each PIA server gives us a gateway IP (server_vip) and two tunnels can't share one, so work through the servers
-        # PIA gave us for this region until we find one whose gateway IP isn't already in use by another tunnel.
-        wireguardServerInfo = None
-        triedServers = []
-        for candidate in state.wgCandidates:
-            state.wgCn = candidate['cn']
-            state.wgIp = candidate['ip']
-            triedServers.append(state.wgCn)
-            logger.debug(f"Trying PIA wg server {state.wgCn} ({state.wgIp}) for {instance_obj.Name}")
-
-            # If DUAL WAN, some people want to force a gateway. Key is optional, absent behaves the same as null.
-            if config.get("tunnelGateway") is not None:
-                try:
-                    ConfigureTunnelStaticRoute(instance_obj, state.wgIp)
-                except ValueError as e:
-                    logger.error(str(e))
-                    sys.exit(1)
-
-            # Now we have our PIA details, we can now request our WG connection information
-            # because PIA use custom certs which just have a SAN of their name eg london401, we have to put a temporary dns override in, to make it so london401 points to the wg IP
-            override_dns(state.wgCn, state.wgIp)
-            # Get PIA wireguard server connection information
-            try:
-                candidateServerInfo = PIAAddKey(instance_obj, state.wgCn, state.wgIp)
-            except ValueError as e:
-                logger.error(str(e))
-                sys.exit(1)
-
-            # We must check if the gateway IP given by PIA isn't already in use by another tunnel.
-            serverVip = candidateServerInfo['server_vip']
-            if serverVip in assignedVips or CheckIpInRoutes(serverVip, f"wg{instance_obj.WGInstance}"):
-                logger.warning(f"{instance_obj.Name} - the gateway IP {serverVip} given by PIA server {state.wgCn} is already in use by another tunnel, trying the next server in region {state.regionId}")
-                continue
-
-            wireguardServerInfo = candidateServerInfo
+                logger.error(f"PIA token: {e}"); sys.exit(1)
+            dip_s = sess(None, {"Authorization": f"Token {tok}", "content-type": "application/json"}, "/usr/local/share/certs/ca-root-nss.crt")
             break
 
-        # Every server PIA offered for this region clashed with another tunnel. PIA's server list is a snapshot of the
-        # servers they currently consider best, so the next run will likely be offered different servers to try.
-        if wireguardServerInfo is None:
-            logger.error(f"{instance_obj.Name} encountered a problem")
-            logger.error(f"Every PIA server tried in region {state.regionId} ({', '.join(triedServers)}) gave a gateway IP that is already in use by another tunnel, cannot configure this tunnel, will try again next time.")
-            instance_obj.ServerChangeFailed = True
+    a_vips = set()
+
+    # Change server per instance
+    for inst in arr:
+        if not inst.ServerChange: continue
+        logger.debug(f"Change server: {inst.Name}")
+        if inst.Dip:
+            dip = opost(dip_s, "https://www.privateinternetaccess.com/api/client/v2/dedicated_ip", {"tokens": [inst.DipToken]})[0]
+            if dip['status'] != "active":
+                logger.error("DIP not active"); sys.exit(2)
+            inst.wgCn, inst.wgIp = dip['cn'], dip['ip']
+            inst.wgCands = [{'cn': dip['cn'], 'ip': dip['ip']}]
+            for r in _cache:
+                if r['id'] == dip['id']:
+                    inst.metaCn, inst.metaIp = r['servers']['meta'][0]['cn'], r['servers']['meta'][0]['ip']
+                    inst.regionId = r['id']; inst.regionPF = r.get('port_forward')
+                    break
+            if not inst.metaCn:
+                logger.error("DIP region not found"); sys.exit(2)
+        else:
+            for r in _cache:
+                if r['id'] == inst.Region:
+                    inst.metaCn, inst.metaIp = r['servers']['meta'][0]['cn'], r['servers']['meta'][0]['ip']
+                    inst.wgCands = r['servers']['wg']
+                    inst.regionId = r['id']; inst.regionPF = r.get('port_forward')
+                    break
+            if not inst.metaCn:
+                logger.error(f"Region {inst.Region} not found"); sys.exit(2)
+        if not inst.wgCands:
+            logger.error(f"{inst.Name}: no WG servers for {inst.regionId}"); inst.ServerChangeFailed = True
             continue
-
-        assignedVips.add(wireguardServerInfo['server_vip'])
-
-        # Write wireguard connection information to file, for later use.
-        # we need to add server name as well, plus the region details so the port forward section knows if the
-        # region we're connected to supports port forwarding, without having to pull the server list every run
-        wireguardServerInfo['server_name'] = state.wgCn
-        wireguardServerInfo['region_id'] = state.regionId
-        wireguardServerInfo['region_port_forward'] = state.regionPortForward
-        with open(instance_obj.InfoFile(), 'w') as filetowrite:
-            filetowrite.write(json.dumps(wireguardServerInfo))
-            logger.debug(f"Saved wireguard server information to {instance_obj.InfoFile()}")
-
-        # Update the server instance, get the current details
-        logger.debug(f"Updating server instance: {instance_obj.WGInstanceName}")
-        try:
-            request = GetRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/wireguard/server/getServer/{instance_obj.WGUUID}")
-        except ValueError as e:
-            logger.error(f"getServer - Error message: {str(e)}")
-            sys.exit(1)
-
-        # Update payload and remove unneeded bits
-        wireguardInstanceInfo = json.loads(request.text)
-        wireguardInstanceInfo['server']['enabled'] = '1'
-        wireguardInstanceInfo['server']['dns'] = ''
-        wireguardInstanceInfo['server']['gateway'] = wireguardServerInfo['server_vip']
-        wireguardInstanceInfo['server']['peers'] = instance_obj.WGPeerUUID
-        wireguardInstanceInfo['server']['port'] = instance_obj.WGPort
-        wireguardInstanceInfo['server']['tunneladdress'] = wireguardServerInfo['peer_ip'] + '/32' # need to add /32 so it does not expand to /8
-        del wireguardInstanceInfo['server']['instance']  # remove this as it's not required in the request
-        if 'carp_depend_on' in wireguardInstanceInfo['server'].keys():
-            del wireguardInstanceInfo['server']['carp_depend_on']
-
-        # Update server instance
-        try:
-            request = PostRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/wireguard/server/setServer/{instance_obj.WGUUID}", wireguardInstanceInfo)
-        except ValueError as e:
-            logger.error(f"setServer - Error message: {str(e)}")
-            sys.exit(1)
-        logger.debug("Updated server instance")
-
-        # Update peer instance with the pia server details
-        logger.debug(f"Updating peer: {instance_obj.WGPeerName}")
-        try:
-            request = GetRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/wireguard/client/getClient/{instance_obj.WGPeerUUID}")
-        except ValueError as e:
-            logger.error(f"getClient - Error message: {str(e)}")
-            sys.exit(1)
-
-        # Update payload and remove unneeded bits
-        wireguardPeerInstanceInfo = json.loads(request.text)
-        wireguardPeerInstanceInfo['client']['enabled'] = '1'
-        wireguardPeerInstanceInfo['client']['serveraddress'] = wireguardServerInfo['server_ip']
-        wireguardPeerInstanceInfo['client']['serverport'] = wireguardServerInfo['server_port']
-        wireguardPeerInstanceInfo['client']['pubkey'] = wireguardServerInfo['server_key']
-        wireguardPeerInstanceInfo['client']['tunneladdress'] = "0.0.0.0/0"
-        wireguardPeerInstanceInfo['client']['keepalive'] = "25"
-        wireguardPeerInstanceInfo['client']['servers'] = instance_obj.WGUUID
-
-        # Update peer instance
-        try:
-            request = PostRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/wireguard/client/setClient/{instance_obj.WGPeerUUID}", wireguardPeerInstanceInfo)
-        except ValueError as e:
-            logger.error(f"setClient - Error message: {str(e)}")
-            sys.exit(1)
-        logger.debug(f"Updated peer")
-
-        # Apply and enable WireGuard changes.
-        # First enable WireGuard if it's not
-        logger.debug(f"Checking WireGuard service enabled")
-        try:
-            request = GetRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/wireguard/general/get")
-        except ValueError as e:
-            logger.error(f"wireguard/general/get - Error message: {str(e)}")
-            sys.exit(1)
-        wgService = json.loads(request.text)
-        if wgService['general']['enabled'] != '1':
-            logger.debug(f"Enabling WireGuard service")
-            createObject = {
-                "general": {
-                    "enabled": '1'
-                }
-            }
-            try:
-                request = PostRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/wireguard/general/set", createObject)
+        inst.wgCn, inst.wgIp = inst.wgCands[0]['cn'], inst.wgCands[0]['ip']
+        logger.debug(f"meta={inst.metaCn} wg={inst.wgCn}")
+        if inst.PortForward and inst.regionPF is False:
+            logger.warning(f"{inst.Name}: PF on but region doesn't support it"); inst.PortForward = False
+        if not inst.Dip:
+            try: inst.token = pia_token()
             except ValueError as e:
-                logger.error(f"set wireguard ON - Error message: {str(e)}")
-                sys.exit(1)
+                logger.error(f"PIAToken: {e}"); sys.exit(1)
+        tried, wgi = [], None
+        for cand in inst.wgCands:
+            inst.wgCn, inst.wgIp = cand['cn'], cand['ip']
+            tried.append(inst.wgCn)
+            if config.get("tunnelGateway") is not None:
+                try: static_route(inst, inst.wgIp)
+                except ValueError as e:
+                    logger.error(str(e)); sys.exit(1)
+            dns(inst.wgCn, inst.wgIp)
+            try: ci = add_key(inst, inst.wgCn, inst.wgIp)
+            except ValueError as e:
+                logger.error(str(e)); sys.exit(1)
+            vip = ci['server_vip']
+            if vip in a_vips or ip_in_routes(vip, f"wg{inst.WGInstance}"):
+                logger.warning(f"{inst.Name}: VIP {vip} taken, next server")
+                continue
+            wgi = ci
+            break
+        if wgi is None:
+            logger.error(f"{inst.Name}: all servers in {inst.regionId} ({', '.join(tried)}) VIP clash")
+            inst.ServerChangeFailed = True
+            continue
+        a_vips.add(wgi['server_vip'])
+        wgi.update(server_name=inst.wgCn, region_id=inst.regionId, region_port_forward=inst.regionPF)
+        json.dump(wgi, open(inst.infoFile(),'w'))
+        srv = oget(f"/api/wireguard/server/getServer/{inst.WGUUID}")
+        srv['server'].update(enabled='1', dns='', gateway=wgi['server_vip'], peers=inst.WGPeerUUID, port=inst.WGPort, tunneladdress=wgi['peer_ip']+'/32')
+        del srv['server']['instance']
+        srv['server'].pop('carp_depend_on', None)
+        opost(f"/api/wireguard/server/setServer/{inst.WGUUID}", srv)
+        pr = oget(f"/api/wireguard/client/getClient/{inst.WGPeerUUID}")
+        pr['client'].update(enabled='1', serveraddress=wgi['server_ip'], serverport=wgi['server_port'], pubkey=wgi['server_key'], tunneladdress="0.0.0.0/0", keepalive="25", servers=inst.WGUUID)
+        opost(f"/api/wireguard/client/setClient/{inst.WGPeerUUID}", pr)
+        if oget('/api/wireguard/general/get')['general']['enabled'] != '1':
+            opost('/api/wireguard/general/set', {"general": {"enabled": '1'}})
+            logger.debug("WG enabled")
+        opost('/api/wireguard/service/reconfigure', {})
+        open(inst.gwFile(),'w').write(wgi['server_vip'])
+        logger.debug(f"Gateway {wgi['server_vip']} saved")
+        new_ip(f"wg{inst.WGInstance}")
+        new_ip(f"wg{inst.WGInstance}")
+        logger.debug(f"{inst.Name} -> {inst.wgCn}")
 
-        # Tell WireGuard to update its config
-        createObject = {}
-        try:
-            request = PostRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/wireguard/service/reconfigure", createObject)
-        except ValueError as e:
-            logger.error(f"wireguard reconfigure - Error message: {str(e)}")
-            sys.exit(1)
-
-        # When a dynamic gateway is used, we need to set the gateway in a tmp file, so OPNsense gateway can pick it up
-        # https://docs.opnsense.org/manual/gateways.html#missing-dynamic-gateway
-        with open(instance_obj.GatewayFile(), 'w') as filetowrite:
-            filetowrite.write(wireguardServerInfo['server_vip'])
-            logger.debug(f"Saved server_vip to {instance_obj.GatewayFile()}")
-
-        # Tell OPNsense there's an new IP on the interface.
-        # Have to run this twice, bugged action on OPNsense I believe.
-        try:
-            InformNewIP(f"wg{instance_obj.WGInstance}")
-            InformNewIP(f"wg{instance_obj.WGInstance}")
-        except ValueError as e:
-            logger.error(f"InformNewIP - Error message: {str(e)}")
-            sys.exit(1)
-
-        ### Tunnel has been pointed to new PIA Server
-        logger.debug(f"Tunnel instance {instance_obj.Name} has been changed to a new PIA server")
-
-    #
-    # Port forward section
-    # Note the tunnel must be up for the port forward requests to work, as they go over the tunnel
-    #
-    # We need to wait if we had to changed server
-    if any(instance.PortForward and instance.ServerChange for instance in instances_array):
-        logger.debug("Waiting 10 seconds for new WireGuard server(s) to apply before applying port forwarding")
+    if any(i.PortForward and i.ServerChange for i in arr):
+        logger.debug("10s wait for new server(s)")
         time.sleep(10)
 
-    for instance_obj in instances_array:
-        processPortForward(instance_obj, currentEpoch)
+    for inst in arr:
+        port_forward(inst, epoch)
 
-    for instance_obj in instances_array:
-        if instance_obj.PostConfigScript and instance_obj.ServerChangeFailed is False:
-            if instance_obj.ServerChange or instance_obj.Port != 0:
-                logger.debug(f"Running post configuration script for {instance_obj.Name}")
+    for inst in arr:
+        if inst.PostConfigScript and not inst.ServerChangeFailed:
+            if inst.ServerChange or inst.Port:
+                sl = [inst.Name] + ([str(inst.Port)] if inst.Port else [])
+                res = subprocess.run([inst.PostConfigScript] + sl, capture_output=True, text=True)
+                lv = logging.WARNING if res.returncode else logging.DEBUG
+                logger.log(lv, "PostConfig rc=%d out=%s err=%s", res.returncode, res.stdout.strip(), res.stderr.strip())
 
-                script_args = [instance_obj.Name]
-                if instance_obj.Port != 0:
-                    logger.debug(f"Adding forwarded port {instance_obj.Port} to second argument for {instance_obj.PostConfigScript}")
-                    script_args.append(str(instance_obj.Port))  # Ensure it's a string for subprocess
-
-                result = subprocess.run([instance_obj.PostConfigScript] + script_args, capture_output=True, text=True)
-
-                log_level = logging.WARNING if result.returncode != 0 else logging.DEBUG
-                logger.log(log_level, "Return code: %d", result.returncode)
-                logger.log(log_level, "stdout: %s", result.stdout.strip())
-                logger.log(log_level, "stderr: %s", result.stderr.strip())
-
-                logger.log(log_level, "Finished running post configuration script")
-
-    logger.debug("Finished")
+    logger.debug("Done")
     sys.exit(0)
