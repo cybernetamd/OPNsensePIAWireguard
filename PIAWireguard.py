@@ -146,7 +146,7 @@ class CustomSSLAdapter(HTTPAdapter):
     def init_poolmanager(self, *args, **kwargs):
         kwargs['ssl_context'] = self.ssl_context
         return super().init_poolmanager(*args, **kwargs)
-    
+
 def CreateRequestsSession(auth, headers, verify=True):
     # For local loopback (OPNsense API) we skip cert checking; for PIA servers we use their CA cert.
     # The adapter's SSL context is what actually controls cert validation on the connection pool,
@@ -175,7 +175,7 @@ def GetRequest(session, url, params = None):
         return r
     except ValueError as e:
         raise ValueError(f"GET Request: Failed {str(e)}")
-    
+
 def PostRequest(session, url, data):
     if not isinstance(session, requests.Session):
         raise ValueError("GET Request: Session variable not set.")
@@ -552,7 +552,7 @@ for instance_name in config.get('instances', {}):
         if keyPair['status'] != "ok":
             logger.error("keyPair response non ok status - trying to generate wireGuard key pair")
             sys.exit(2)
-        
+
         logger.debug("Adding new WireGuard instance (server)")
         instance_obj.WGPubkey = keyPair['pubkey']
         createObject = {
@@ -585,14 +585,14 @@ for instance_name in config.get('instances', {}):
     except ValueError as e:
         logger.error(f"WireGuard instance - Error message: {str(e)}")
         sys.exit(1)
-    
+
     wireguardInstanceInfo = json.loads(request.text)['server']
     instance_obj.WGInstance = wireguardInstanceInfo["instance"]
     instance_obj.WGGateway = wireguardInstanceInfo["gateway"]
     for peer in wireguardInstanceInfo['peers']:
         if wireguardInstanceInfo['peers'][peer]['selected'] == 1:
             instance_obj.WGPeerUUID = peer
-    
+
     if instance_obj.WGPeerUUID == '':
         logger.debug("Creating missing peer (PIA's Server)")
         createObject = {
@@ -626,7 +626,7 @@ for instance_name in config.get('instances', {}):
         # Update payload and remove unneeded bits
         wireguardPeerInstanceInfo = json.loads(request.text)['client']
         instance_obj.WGPeerPubkey = wireguardPeerInstanceInfo['pubkey'].replace("=\n\n\n", '=')
-    
+
     logger.debug(f"Finished getting {instance_name} tunnel instance information from OPNsense")
 
     instances_array.append(instance_obj)
@@ -863,7 +863,7 @@ for instance_obj in instances_array:
     except ValueError as e:
         logger.error(f"getServer - Error message: {str(e)}")
         sys.exit(1)
-    
+
     # Update payload and remove unneeded bits
     wireguardInstanceInfo = json.loads(request.text)
     wireguardInstanceInfo['server']['enabled'] = '1'
@@ -891,7 +891,7 @@ for instance_obj in instances_array:
     except ValueError as e:
         logger.error(f"getClient - Error message: {str(e)}")
         sys.exit(1)
-    
+
     # Update payload and remove unneeded bits
     wireguardPeerInstanceInfo = json.loads(request.text)
     wireguardPeerInstanceInfo['client']['enabled'] = '1'
@@ -931,7 +931,7 @@ for instance_obj in instances_array:
         except ValueError as e:
             logger.error(f"set wireguard ON - Error message: {str(e)}")
             sys.exit(1)
-    
+
     # Tell WireGuard to update its config
     createObject = {}
     try:
@@ -997,7 +997,7 @@ for instance_obj in instances_array:
         wireguardSignature = json.loads(open(instance_obj.PortSignatureFile(), 'r').read())
     else:
         newPortRequired = True
-    
+
     # get wireguard Server information
     if os.path.isfile(instance_obj.InfoFile()):
         wireguardServerInfo = json.loads(open(instance_obj.InfoFile(), 'r').read())
@@ -1051,7 +1051,7 @@ for instance_obj in instances_array:
         if secondsDifferent > 599:
             portRefresh = True
             logger.debug("port refresh required")
-    
+
     # first of we need to get a signature, signature lasts two months, we so only need to get it on serverChange. Server policy for reboots is every 2-3 months anyway
     # Might be a good idea to set cron to change PIA server every 2 month anyway
     if newPortRequired:
@@ -1096,7 +1096,7 @@ for instance_obj in instances_array:
             filetowrite.write(str(payloadInfo['port']))
             logger.debug(f"Saved port number to {instance_obj.WebPortFile()}")
         # written port to file
-    
+
     # The requested port has a timer that needs to be refresh so you can keep the port active.
     # Must be refreshed atleast every 15 minutes.
     # We'll also update the firewall alias during this step
@@ -1210,7 +1210,7 @@ for instance_obj in instances_array:
             if reconfigure['status'] != 'ok':
                 logger.error(f"reconfigure aliases - Error message: {str(reconfigure)}")
                 sys.exit(1)
-            
+
     logger.debug(f"Finished processing port forward for tunnel instance {instance_obj.Name}")
 
 for instance_obj in instances_array:
