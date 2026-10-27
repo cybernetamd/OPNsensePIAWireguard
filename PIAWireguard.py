@@ -1023,7 +1023,7 @@ for instance_obj in instances_array:
         newPortRequired = True
         logger.debug("Port not allocated, requesting port")
 
-    # We'll check the expiry of the port, and if its expired
+    # We'll check the expiry of the port, and if it's expired
     if wireguardSignature is not None and newPortRequired is False:
         expiryDate = wireguardSignature['expires_at']
         if '.' in expiryDate:
