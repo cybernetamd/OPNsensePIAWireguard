@@ -60,10 +60,11 @@ def validate_json(data):
     if not name_pattern.match(data['opnsenseWGPrefixName']):
         raise ValueError(f"Invalid opnsenseWGPrefixName value '{data['opnsenseWGPrefixName']}'")
 
-    # tunnelGateway is optional, a missing key means the same as null (no forced outgoing gateway)
-    tunnelGateway = data.get("tunnelGateway")
-    if tunnelGateway is not None and (not isinstance(tunnelGateway, str) or not tunnelGateway.strip()):
-        raise ValueError("Property 'tunnelGateway' must be null or the non-blank name of a WAN gateway")
+    # tunnelGateway is optional, a missing key or null means the same thing (no forced outgoing gateway)
+    if "tunnelGateway" in data:
+        tunnelGateway = data["tunnelGateway"]
+        if tunnelGateway is not None and (not isinstance(tunnelGateway, str) or not tunnelGateway.strip()):
+            raise ValueError("Property 'tunnelGateway' must be null or the non-blank name of a WAN gateway")
 
     # Warn about keys we don't recognise, so typos and made up settings don't silently do nothing
     for key in data:
