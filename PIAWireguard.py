@@ -254,7 +254,7 @@ def ConfigureTunnelStaticRoute(instance_obj, wgIp):
     If DUAL WAN, some people want to force a gateway, so create/update a static route for the PIA server we're
     about to connect to, making sure it goes out of the WAN gateway they've configured.
     """
-    logger.debug("tunnelGateway has been configured, will setup static route for PIA tunnel, to enforce outgoing gateway")
+    logger.debug("tunnelGateway has been configured, will set up a static route for the PIA tunnel to enforce the outgoing gateway")
     tunnelGateway = config.get('tunnelGateway')
     try:
         request = GetRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/routes/routes/searchRoute/")
@@ -540,7 +540,7 @@ for instance_name in config.get('instances', {}):
             break
 
     if instance_obj.WGUUID == "":
-        logger.debug(f"{instance_obj.Name} tunnel instance missing in OPNsense will create it.")
+        logger.debug(f"{instance_obj.Name} tunnel instance missing in OPNsense, will create it.")
         logger.debug("Generating KeyPair.")
         try:
             request = GetRequest(opnsenseRequestsSession, f"{config['opnsenseURL']}/api/wireguard/server/keyPair/")
@@ -762,7 +762,7 @@ for instance_obj in instances_array:
 
         # couldn't find region, make sure the piaRegionId is set correctly
         if state.metaCn == '':
-            logger.error(f"region {instance_obj.Region} not found, is the correct region for the instance set")
+            logger.error(f"region {instance_obj.Region} not found, is the correct region set for the instance")
             sys.exit(2)
 
     # PIA didn't give us any wireguard servers to try for this region
@@ -840,7 +840,7 @@ for instance_obj in instances_array:
     # servers they currently consider best, so the next run will likely be offered different servers to try.
     if wireguardServerInfo is None:
         logger.error(f"{instance_obj.Name} encountered a problem")
-        logger.error(f"Every PIA server tried in region {state.regionId} ({', '.join(triedServers)}) gave a gateway IP that is already in use by another tunnel, can not configure this tunnel, will try again next time.")
+        logger.error(f"Every PIA server tried in region {state.regionId} ({', '.join(triedServers)}) gave a gateway IP that is already in use by another tunnel, cannot configure this tunnel, will try again next time.")
         instance_obj.ServerChangeFailed = True
         continue
 
@@ -1118,7 +1118,7 @@ for instance_obj in instances_array:
         if wireguardPort['status'] != 'OK':
             if os.path.isfile(instance_obj.WebPortFile()):
                 os.remove(instance_obj.WebPortFile())
-                logger.error("Removed port file because status is no longer ok status returned from port refresh, will attempt new port next time")
+                logger.error("Removed port file because the port refresh no longer returned an ok status, will attempt a new port next time")
 
         # save required information to file for next time
         wireguardSignature['refresh_epoch'] = currentEpoch
