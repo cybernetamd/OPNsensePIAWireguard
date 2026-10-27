@@ -125,10 +125,16 @@ def CheckForDupKey(ordered_pairs):
     return d
 
 def create_custom_ssl_context(verify=True):
+    """
+    Creates an SSL context for PIA's self-signed WireGuard certs.
+    When verify=False (used for OPNsense local loopback), we skip cert validation entirely.
+    When verify=True (used for PIA servers), we use the provided CA cert with relaxed strictness.
+    """
     custom_context = ssl.create_default_context()
+    # PIA's certs trigger VERIFY_X509_STRICT warnings on newer OpenSSL, so relax it
     custom_context.verify_flags &= ~ssl.VERIFY_X509_STRICT
     if not verify:
-        custom_context.check_hostname = False  # Must be disabled BEFORE changing verify_mode
+        custom_context.check_hostname = False
         custom_context.verify_mode = ssl.CERT_NONE
     return custom_context
 
