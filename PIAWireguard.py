@@ -155,7 +155,7 @@ def CreateRequestsSession(auth, headers, verify = True):
 
 def GetRequest(session, url, params = None):
     if not isinstance(session, requests.Session):
-        raise ValueError("GET Request: Session variable not set.")
+        raise ValueError("POST Request: Session variable not set.")
     try:
         r = session.get(url, params=params, timeout=10)
         if r.status_code == 401:
