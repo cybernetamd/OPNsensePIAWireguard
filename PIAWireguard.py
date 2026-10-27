@@ -928,7 +928,7 @@ for instance_obj in instances_array:
         logger.error(f"wireguard reconfigure - Error message: {str(e)}")
         sys.exit(1)
     
-    # When a dynmatic gateway is used, we need to set the gateway in a tmp file, so OPNsense gateway can pickup on it
+    # When a dynamic gateway is used, we need to set the gateway in a tmp file, so OPNsense gateway can pick it up
     # https://docs.opnsense.org/manual/gateways.html#missing-dynamic-gateway
     with open(instance_obj.GatewayFile(), 'w') as filetowrite:
         filetowrite.write(wireguardServerInfo['server_vip'])
