@@ -956,7 +956,7 @@ for instance_obj in instances_array:
 #
 # Port forward section
 # Note the tunnel must be up for the port forward requests to work, as they go over the tunnel
-#    
+#
 # We need to wait if we had to changed server
 if any(instance.PortForward and instance.ServerChange for instance in instances_array):
     logger.debug("Waiting 10 seconds for new WireGuard server(s) to apply before applying port forwarding")
