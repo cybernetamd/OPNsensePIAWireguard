@@ -140,7 +140,10 @@ class CustomSSLAdapter(HTTPAdapter):
         kwargs['ssl_context'] = self.ssl_context
         return super().init_poolmanager(*args, **kwargs)
     
-def CreateRequestsSession(auth, headers, verify = True):
+def CreateRequestsSession(auth, headers, verify=True):
+    # For local loopback (OPNsense API) we skip cert checking; for PIA servers we use their CA cert.
+    # The adapter's SSL context is what actually controls cert validation on the connection pool,
+    # session.verify alone would be overridden by our adapter, so set both.
     session = requests.Session()
     ssl_context = create_custom_ssl_context(verify)
     session.mount('https://', CustomSSLAdapter(ssl_context=ssl_context))
