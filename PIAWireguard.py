@@ -219,7 +219,7 @@ def PIAToken(data):
             raise ValueError(f"returned non 200 status code - {r.text}")
         return json.loads(r.text)['token']
     except ValueError as e:
-        raise ValueError(f"GET Request: Failed {str(e)}")
+        raise ValueError(f"POST Request: Failed {str(e)}")
 
 def CheckIpInRoutes(ip, exemptNetif):
     try:
