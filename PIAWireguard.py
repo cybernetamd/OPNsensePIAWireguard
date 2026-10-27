@@ -439,7 +439,9 @@ class State:
     regionId = ''
     regionPortForward = None
 
-# Fixes bug in python requests where this env is preferred over Verify=False
+# PIA's WireGuard servers use self-signed certs with a SAN, so we verify against their CA cert
+# directly (state.ca). The REQUESTS_CA_BUNDLE env var, if set by OPNsense, would override our
+# per-session verify setting, so we remove it to ensure our custom SSL context takes effect.
 if 'REQUESTS_CA_BUNDLE' in os.environ:
     del os.environ['REQUESTS_CA_BUNDLE']
 
