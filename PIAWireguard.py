@@ -139,6 +139,7 @@ def create_custom_ssl_context(verify=True):
     return custom_context
 
 class CustomSSLAdapter(HTTPAdapter):
+    """requests adapter that injects our custom SSL context into the connection pool."""
     def __init__(self, ssl_context=None, **kwargs):
         self.ssl_context = ssl_context
         super().__init__(**kwargs)
