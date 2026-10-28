@@ -143,6 +143,17 @@ def pia_regions():
     except requests.exceptions.RequestException as e:
         raise ValueError(f"GET Request: Failed - could not reach server list: {e}")
 
+def piapost(s, url, data, timeout=10):
+    try:
+        r = s.post(url, json=data, timeout=timeout)
+        if r.status_code == 401: raise ValueError("unauthorized")
+        if r.status_code != 200: raise ValueError(f"returned non 200 status code - {r.text}")
+        return r
+    except ValueError as e:
+        raise ValueError(f"POST Request: Failed {e}")
+    except requests.exceptions.RequestException as e:
+        raise ValueError(f"POST Request: Failed - could not reach {url}: {e}")
+
 def regions():
     global _cache
     if _cache is None: _cache = pia_regions()
@@ -250,6 +261,24 @@ def static_route(inst, ip):
             raise ValueError(f"route reconfigure - Error message: {e}")
         if res['status'] != "ok": raise ValueError(f"route reconfigure - Error message: {res}")
         logger.debug(f"Route {ip} via {tg}")
+
+def static_route_cleanup(inst):
+    tg = config.get('tunnelGateway')
+    try:
+        routes = oget('/api/routes/routes/searchRoute/')['rows']
+        uid = next((r['uuid'] for r in routes if r['descr'] == inst.WGPeerName), '')
+        if not uid: return
+        cur = oget(f"/api/routes/routes/getRoute/{uid}")
+        cip = cur['route']['network']
+        cgw = next((g for g in cur['route']['gateway'] if cur['route']['gateway'][g]['selected']==1), '')
+        # Route was updated for this run (ip matches) -> keep it; else it's stale -> disable
+        if cgw != tg or cip != inst.wgIp+'/32':
+            cur['route'].update(disabled='1')
+            opost(f"/api/routes/routes/setRoute/{uid}", cur)
+            opost('/api/routes/routes/reconfigure/', {})
+            logger.debug(f"Stale route {cip} via {cgw} disabled")
+    except ValueError as e:
+        logger.warning(f"Route cleanup (non-fatal): {e}")
 
 # --- Port forward ---
 def port_forward(inst, epoch):
@@ -479,7 +508,7 @@ if __name__ == '__main__':
         if not inst.ServerChange: continue
         logger.debug(f"Change server: {inst.Name}")
         if inst.Dip:
-            dip = opost(dip_s, "https://www.privateinternetaccess.com/api/client/v2/dedicated_ip", {"tokens": [inst.DipToken]})[0]
+            dip = json.loads(piapost(dip_s, "https://www.privateinternetaccess.com/api/client/v2/dedicated_ip", {"tokens": [inst.DipToken]}).text)[0]
             if dip['status'] != "active":
                 logger.error("DIP not active"); sys.exit(2)
             inst.wgCn, inst.wgIp = dip['cn'], dip['ip']
@@ -522,10 +551,12 @@ if __name__ == '__main__':
             dns(inst.wgCn, inst.wgIp)
             try: ci = add_key(inst, inst.wgCn, inst.wgIp)
             except ValueError as e:
+                if config.get("tunnelGateway") is not None: static_route_cleanup(inst)
                 logger.error(str(e)); sys.exit(1)
             vip = ci['server_vip']
             if vip in a_vips or ip_in_routes(vip, f"wg{inst.WGInstance}"):
                 logger.warning(f"{inst.Name}: VIP {vip} taken, next server")
+                if config.get("tunnelGateway") is not None: static_route_cleanup(inst)
                 continue
             wgi = ci
             break
