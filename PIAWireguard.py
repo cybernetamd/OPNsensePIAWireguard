@@ -420,9 +420,10 @@ if __name__ == '__main__':
     args = ap.parse_args()
     if args.debug: logging.getLogger().setLevel(logging.DEBUG)
 
-    # Future-proof: prefer $PIA_CONFIG, else the canonical /usr/local/etc/ (survives
-    # OPNsense upgrades), else the script's own dir. One source of truth -> no drift.
-    _cfgcands = [os.environ.get('PIA_CONFIG'), '/usr/local/etc/PIAWireguard.json', os.path.join(sys.path[0], "PIAWireguard.json")]
+    # One source of truth: read the config from this script's own directory
+    # (deploy to /conf/ -> reads /conf/PIAWireguard.json; works anywhere).
+    # $PIA_CONFIG still overrides for one-off deploys in a non-standard spot.
+    _cfgcands = [os.environ.get('PIA_CONFIG'), os.path.join(sys.path[0], "PIAWireguard.json")]
     cfgf = next((c for c in _cfgcands if c and os.path.isfile(c)), None)
     if not cfgf:
         logger.error(f"Config not found (tried: {', '.join(c for c in _cfgcands if c)})"); sys.exit(1)
