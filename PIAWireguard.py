@@ -52,10 +52,18 @@ def sess(auth=None, hdrs=None, verify=True):
 
 # --- HTTP ---
 def req(s, method, url, data=None, params=None, timeout=10):
-    r = s.request(method, url, json=data, params=params, timeout=timeout)
-    if r.status_code == 401: raise ValueError("unauthorized")
-    if r.status_code != 200: raise ValueError(f"HTTP {r.status_code}: {r.text}")
-    return r
+    """OPNsense HTTP. Raises ValueError for ALL failures (status + network)."""
+    prefix = "GET" if method == 'GET' else "POST"
+    try:
+        if not isinstance(s, requests.Session): raise ValueError(f"{prefix} Request: Session variable not set.")
+        r = s.request(method, url, json=data, params=params, timeout=timeout)
+        if r.status_code == 401: raise ValueError("unauthorized")
+        if r.status_code != 200: raise ValueError(f"returned non 200 status code - {r.text}")
+        return r
+    except ValueError as e:
+        raise ValueError(f"{prefix} Request: Failed {e}")
+    except requests.exceptions.RequestException as e:
+        raise ValueError(f"{prefix} Request: Failed - could not reach {url}: {e}")
 
 def oget(path):
     return json.loads(req(osess, 'GET', f"{config['opnsenseURL']}{path}").text)
@@ -127,10 +135,13 @@ def pia_token():
 def pia_regions():
     try:
         r = requests.get("https://serverlist.piaservers.net/vpninfo/servers/v6", headers={'User-Agent': UA}, timeout=15)
-        if r.status_code != 200: raise ValueError(f"HTTP {r.status_code}")
+        if r.status_code == 401: raise ValueError("unauthorized")
+        if r.status_code != 200: raise ValueError(f"returned non 200 status code - {r.text}")
         return json.loads(r.text.split('\n')[0])['regions']
-    except (ValueError, requests.exceptions.RequestException) as e:
-        raise ValueError(f"PIA regions: {e}")
+    except ValueError as e:
+        raise ValueError(f"GET Request: Failed {e}")
+    except requests.exceptions.RequestException as e:
+        raise ValueError(f"GET Request: Failed - could not reach server list: {e}")
 
 def regions():
     global _cache
@@ -196,29 +207,48 @@ def add_key(inst, cn, ip):
     auth = (f"dedicated_ip_{inst.DipToken}", ip) if inst.Dip else None
     params = {"pubkey": inst.WGPubkey} if inst.Dip else {"pt": inst.token, "pubkey": inst.WGPubkey}
     s = sess(auth, None, CA)
-    return json.loads(req(s, 'GET', f"https://{cn}:1337/addKey", params=params).text)
+    try:
+        return json.loads(req(s, 'GET', f"https://{cn}:1337/addKey", params=params).text)
+    except ValueError as e:
+        raise ValueError(f"addKey {'DIP' if inst.Dip else 'non-DIP'} - Error message: {e}")
 
 def static_route(inst, ip):
     tg = config.get('tunnelGateway')
-    routes = oget('/api/routes/routes/searchRoute/')['rows']
+    try:
+        routes = oget('/api/routes/routes/searchRoute/')['rows']
+    except ValueError as e:
+        raise ValueError(f"searchRoute - Error message: {e}")
     uid = next((r['uuid'] for r in routes if r['descr'] == inst.WGPeerName), '')
     upd = False
     if uid == '':
-        res = opost('/api/routes/routes/addRoute/', {"route": {"disabled":'0','network':ip+'/32','gateway':tg,'descr':inst.WGPeerName}})
-        if res['result'] != "saved": raise ValueError(f"addRoute: {res}")
+        try:
+            res = opost('/api/routes/routes/addRoute/', {"route": {"disabled":'0','network':ip+'/32','gateway':tg,'descr':inst.WGPeerName}})
+        except ValueError as e:
+            raise ValueError(f"addRoute - Error message: {e}")
+        if res['result'] != "saved": raise ValueError(f"addRoute - Error message: {res}")
         upd = True
     else:
-        cur = oget(f"/api/routes/routes/getRoute/{uid}")
+        try:
+            cur = oget(f"/api/routes/routes/getRoute/{uid}")
+        except ValueError as e:
+            raise ValueError(f"getRoute - Error message: {e}")
         cip = cur['route']['network']
         cgw = next((g for g in cur['route']['gateway'] if cur['route']['gateway'][g]['selected']==1), '')
+        logger.debug(f"Current Gateway: {cgw}, Current Routed IP: {cip}")
         if cgw != tg or cip != ip+'/32':
             cur['route'].update(network=ip+'/32', gateway=tg, disabled='0')
-            res = opost(f"/api/routes/routes/setRoute/{uid}", cur)
-            if res['result'] != "saved": raise ValueError(f"setRoute: {res}")
+            try:
+                res = opost(f"/api/routes/routes/setRoute/{uid}", cur)
+            except ValueError as e:
+                raise ValueError(f"setRoute - Error message: {e}")
+            if res['result'] != "saved": raise ValueError(f"setRoute - Error message: {res}")
             upd = True
     if upd:
-        res = opost('/api/routes/routes/reconfigure/', {})
-        if res['status'] != "ok": raise ValueError(f"route reconfig: {res}")
+        try:
+            res = opost('/api/routes/routes/reconfigure/', {})
+        except ValueError as e:
+            raise ValueError(f"route reconfigure - Error message: {e}")
+        if res['status'] != "ok": raise ValueError(f"route reconfigure - Error message: {res}")
         logger.debug(f"Route {ip} via {tg}")
 
 # --- Port forward ---
@@ -232,7 +262,7 @@ def port_forward(inst, epoch):
     sig = json.load(open(sf)) if os.path.isfile(sf) else None
     info = json.load(open(if_)) if os.path.isfile(if_) else None
     if info is None:
-        logger.debug(f"Server info missing: {if_}")
+        logger.debug(f"wireguard server information missing for port forward {if_}")
         sys.exit(2)
     new_port = inst.ServerChange or sig is None
     rpf = info.get('region_port_forward')
@@ -241,12 +271,12 @@ def port_forward(inst, epoch):
         if rid:
             try: rpf = region_pf(rid)
             except ValueError as e:
-                logger.error(f"PIA regions: {e}"); sys.exit(1)
+                logger.error(f"Failed to get PIA Server List: {e}"); sys.exit(1)
         if rpf is not None:
             info.update(region_id=rid, region_port_forward=rpf)
             json.dump(info, open(if_,'w'))
     if rpf is False:
-        logger.warning(f"{inst.Name}: portForward on but region {info.get('region_id')} doesn't support it")
+        logger.warning(f"{inst.Name} has portForward enabled, but PIA region {info.get('region_id')} doesn't support port forwarding, so no port will be requested. " + "Either set portForward to false for this instance, or pick a region that supports it (see --listregions)")
         return
     if not os.path.isfile(pf):
         new_port = True; logger.debug("No port yet")
@@ -266,14 +296,14 @@ def port_forward(inst, epoch):
         logger.debug("Getting PIA token for port forward")
         try: tok = pia_token()
         except ValueError as e:
-            logger.error(f"PIAToken: {e}"); sys.exit(1)
+            logger.error(f"PIAToken - Error message: {e}"); sys.exit(1)
         dns(info['server_name'], info['server_vip'])
         try:
             sig = json.loads(req(gs, 'POST', f"https://{info['server_name']}:19999/getSignature", data={"token": tok}).text)
         except ValueError as e:
-            logger.error(f"getSignature: {e}"); sys.exit(1)
+            logger.error(f"getSignature - Error message: {e}"); sys.exit(1)
         if sig['status'] != 'OK':
-            logger.error("getSignature != OK"); sys.exit(2)
+            logger.error("wireguardSignature status came back with not OK"); sys.exit(2)
         pl = json.loads(base64.b64decode(sig['payload']))
         sig['expires_at'] = pl['expires_at']; sig['port'] = pl['port']
         open(pf,'w').write(str(pl['port']))
@@ -283,32 +313,47 @@ def port_forward(inst, epoch):
         try:
             bind = json.loads(req(gs, 'POST', f"https://{info['server_name']}:19999/bindPort", data={"payload":sig['payload'],"signature":sig['signature']}).text)
         except ValueError as e:
-            logger.error(f"bindPort: {e}"); sys.exit(1)
+            logger.error(f"bindPort - Error message: {e}"); sys.exit(1)
         if bind['status'] != 'OK' and os.path.isfile(pf):
-            os.remove(pf); logger.error("Removed port file (bindPort != OK)")
+            os.remove(pf); logger.error("Removed port file because the port refresh no longer returned an ok status, will attempt a new port next time")
         sig['refresh_epoch'] = epoch
         json.dump(sig, open(sf,'w'))
     if new_port:
-        au = oget(f"/api/firewall/alias/getAliasUUID/{inst.PiaPortName}")
+        try:
+            au = oget(f"/api/firewall/alias/getAliasUUID/{inst.PiaPortName}")
+        except ValueError as e:
+            logger.error(f"getAliasUUID - Error message: {e}"); sys.exit(1)
         auid = au['uuid'] if au else ''
         aupd = False
         if auid == '':
-            opost('/api/firewall/alias/addItem/', {"alias":{"enabled":'1',"name":inst.PiaPortName,"description":f"PIA PF {inst.Name}","type":"port","content":sig['port']}})
+            try:
+                opost('/api/firewall/alias/addItem/', {"alias":{"enabled":'1',"name":inst.PiaPortName,"description":f"PIA Port forwarded, port from WireGuard PIA instance {inst.Name}","type":"port","content":sig['port']}})
+            except ValueError as e:
+                logger.error(f"addItem alias - Error message: {e}"); sys.exit(1)
             aupd = True; inst.Port = sig['port']
         else:
-            cur = oget(f"/api/firewall/alias/getItem/{auid}")
+            try:
+                cur = oget(f"/api/firewall/alias/getItem/{auid}")
+            except ValueError as e:
+                logger.error(f"getItem alias - Error message: {e}"); sys.exit(1)
             cp = next((v['value'] for v in cur['alias']['content'].values() if v['selected']==1), "0")
             if cp != str(sig['port']):
                 cur['alias'].update(content=sig['port'], type='port', counters='', proto='', interface='')
                 for k in ['categories','authtype']: cur['alias'].pop(k, None)
-                res = opost(f"/api/firewall/alias/setItem/{auid}", cur)
+                try:
+                    res = opost(f"/api/firewall/alias/setItem/{auid}", cur)
+                except ValueError as e:
+                    logger.error(f"setItem alias - Error message: {e}"); sys.exit(1)
                 if res['result'] != 'saved':
-                    logger.error(f"setItem alias: {res}"); sys.exit(1)
+                    logger.error(f"setItem alias - Response error message: {res}"); sys.exit(1)
                 aupd = True; inst.Port = sig['port']
         if aupd:
-            res = opost('/api/firewall/alias/reconfigure', {})
+            try:
+                res = opost('/api/firewall/alias/reconfigure', {})
+            except ValueError as e:
+                logger.error(f"reconfigure aliases - Error message: {e}"); sys.exit(1)
             if res['status'] != 'ok':
-                logger.error(f"alias reconfig: {res}"); sys.exit(1)
+                logger.error(f"reconfigure aliases - Error message: {res}"); sys.exit(1)
             logger.debug("Firewall aliases updated")
     logger.debug(f"Port forward done for {inst.Name}")
 
@@ -331,9 +376,9 @@ if __name__ == '__main__':
         try:
             r = requests.get("https://serverlist.piaservers.net/vpninfo/servers/v6", headers={'User-Agent': UA}, timeout=15)
         except requests.exceptions.RequestException as e:
-            logger.error(f"PIA regions: {e}"); sys.exit(2)
+            logger.error(f"Failed to reach PIA server list: {e}"); sys.exit(2)
         if r.status_code != 200:
-            logger.error(f"PIA regions HTTP {r.status_code}"); sys.exit(2)
+            logger.error(f"Failed to get PIA server list, URL returned HTTP {r.status_code}. Is there a connectivity issue?"); sys.exit(2)
         for x in sorted(f"{x['name']} | {x['id']} | PF:{x['port_forward']} | Geo:{x['geo']}" for x in json.loads(r.text.split('\n')[0])['regions']):
             logger.info(x)
         logger.info("* Geo-located = not physically in exit region")
@@ -346,7 +391,10 @@ if __name__ == '__main__':
     _init_osess()
 
     # Build instance array
-    wg_rows = oget('/api/wireguard/server/searchServer/')['rows']
+    try:
+        wg_rows = oget('/api/wireguard/server/searchServer/')['rows']
+    except ValueError as e:
+        logger.error(f"Failed to list OPNsense WG Instances - Error message: {e}"); sys.exit(1)
     arr = []
     for name in config.get('instances', {}):
         inst = Inst(name)
@@ -356,30 +404,48 @@ if __name__ == '__main__':
                 inst.WGPubkey = wg['pubkey'].replace("=\n\n\n", '=')
                 break
         if not inst.WGUUID:
-            kp = oget('/api/wireguard/server/keyPair/')
+            try:
+                kp = oget('/api/wireguard/server/keyPair/')
+            except ValueError as e:
+                logger.error(f"KeyPair - Error message: {e}"); sys.exit(1)
             if kp['status'] != "ok":
-                logger.error(f"keyPair: {kp}"); sys.exit(2)
+                logger.error("keyPair response non ok status - trying to generate wireGuard key pair"); sys.exit(2)
             inst.WGPubkey = kp['pubkey']
-            res = opost('/api/wireguard/server/addServer/', {"server":{"enabled":'0',"name":inst.WGInstanceName,"pubkey":kp['pubkey'],"privkey":kp['privkey'],"port":inst.WGPort,"tunneladdress":inst.WGIP,"disableroutes":'1',"gateway":inst.WGGateway}})
+            try:
+                res = opost('/api/wireguard/server/addServer/', {"server":{"enabled":'0',"name":inst.WGInstanceName,"pubkey":kp['pubkey'],"privkey":kp['privkey'],"port":inst.WGPort,"tunneladdress":inst.WGIP,"disableroutes":'1',"gateway":inst.WGGateway}})
+            except ValueError as e:
+                logger.error(f"Add Instance (server) - Error message: {e}"); sys.exit(1)
             if res['result'] != 'saved':
-                logger.error(f"addServer: {res}"); sys.exit(1)
+                logger.error(f"WireGuard creating Instance (server) - failed to add {json.dumps(res)}"); sys.exit(1)
             inst.WGUUID = res['uuid']
-        wg_info = oget(f"/api/wireguard/server/getServer/{inst.WGUUID}")['server']
+        try:
+            wg_info = oget(f"/api/wireguard/server/getServer/{inst.WGUUID}")['server']
+        except ValueError as e:
+            logger.error(f"WireGuard instance - Error message: {e}"); sys.exit(1)
         inst.WGInstance = wg_info["instance"]
         inst.WGGateway = wg_info["gateway"]
         for peer in wg_info['peers']:
             if wg_info['peers'][peer]['selected'] == 1: inst.WGPeerUUID = peer
         if not inst.WGPeerUUID:
-            res = opost('/api/wireguard/client/addClient/', {"client":{"enabled":'1',"name":inst.WGPeerName,"pubkey":fake_key(),"tunneladdress":"0.0.0.0/0","keepalive":'25',"servers":inst.WGUUID}})
+            try:
+                res = opost('/api/wireguard/client/addClient/', {"client":{"enabled":'1',"name":inst.WGPeerName,"pubkey":fake_key(),"tunneladdress":"0.0.0.0/0","keepalive":'25',"servers":inst.WGUUID}})
+            except ValueError as e:
+                logger.error(f"WireGuard creating peer - Error message: {e}"); sys.exit(1)
             if res['result'] != 'saved':
-                logger.error(f"addClient: {res}"); sys.exit(1)
+                logger.error(f"WireGuard creating peer - failed to add {json.dumps(res)}"); sys.exit(1)
             inst.WGPeerUUID = res['uuid']
         else:
-            inst.WGPeerPubkey = oget(f"/api/wireguard/client/getClient/{inst.WGPeerUUID}")['client']['pubkey'].replace("=\n\n\n", '=')
+            try:
+                inst.WGPeerPubkey = oget(f"/api/wireguard/client/getClient/{inst.WGPeerUUID}")['client']['pubkey'].replace("=\n\n\n", '=')
+            except ValueError as e:
+                logger.error(f"getClient - Error message: {e}"); sys.exit(1)
         arr.append(inst)
 
     # Handshakes
-    peers = oget('/api/wireguard/service/show/')["rows"]
+    try:
+        peers = oget('/api/wireguard/service/show/')["rows"]
+    except ValueError as e:
+        logger.error(f"Getting handshakes - Error message: {e}"); sys.exit(1)
     epoch = int(time.time())
     for inst in arr:
         for p in peers:
@@ -394,7 +460,7 @@ if __name__ == '__main__':
     if any(i.ServerChange for i in arr):
         try: regions()
         except ValueError as e:
-            logger.error(f"PIA regions: {e}"); sys.exit(1)
+            logger.debug(f"Failed to get PIA Server List: {e}"); sys.exit(1)
 
     # DIP token (once)
     dip_s = None
@@ -470,25 +536,43 @@ if __name__ == '__main__':
         a_vips.add(wgi['server_vip'])
         wgi.update(server_name=inst.wgCn, region_id=inst.regionId, region_port_forward=inst.regionPF)
         json.dump(wgi, open(inst.infoFile(),'w'))
-        srv = oget(f"/api/wireguard/server/getServer/{inst.WGUUID}")
+        try:
+            srv = oget(f"/api/wireguard/server/getServer/{inst.WGUUID}")
+        except ValueError as e:
+            logger.error(f"getServer - Error message: {e}"); sys.exit(1)
         srv['server'].update(enabled='1', dns='', gateway=wgi['server_vip'], peers=inst.WGPeerUUID, port=inst.WGPort, tunneladdress=wgi['peer_ip']+'/32')
         del srv['server']['instance']
         srv['server'].pop('carp_depend_on', None)
-        opost(f"/api/wireguard/server/setServer/{inst.WGUUID}", srv)
-        pr = oget(f"/api/wireguard/client/getClient/{inst.WGPeerUUID}")
+        try:
+            opost(f"/api/wireguard/server/setServer/{inst.WGUUID}", srv)
+        except ValueError as e:
+            logger.error(f"setServer - Error message: {e}"); sys.exit(1)
+        try:
+            pr = oget(f"/api/wireguard/client/getClient/{inst.WGPeerUUID}")
+        except ValueError as e:
+            logger.error(f"getClient - Error message: {e}"); sys.exit(1)
         pr['client'].update(enabled='1', serveraddress=wgi['server_ip'], serverport=wgi['server_port'], pubkey=wgi['server_key'], tunneladdress="0.0.0.0/0", keepalive="25", servers=inst.WGUUID)
-        opost(f"/api/wireguard/client/setClient/{inst.WGPeerUUID}", pr)
-        if oget('/api/wireguard/general/get')['general']['enabled'] != '1':
-            opost('/api/wireguard/general/set', {"general": {"enabled": '1'}})
-            logger.debug("WG enabled")
-        opost('/api/wireguard/service/reconfigure', {})
+        try:
+            opost(f"/api/wireguard/client/setClient/{inst.WGPeerUUID}", pr)
+        except ValueError as e:
+            logger.error(f"setClient - Error message: {e}"); sys.exit(1)
+        try:
+            if oget('/api/wireguard/general/get')['general']['enabled'] != '1':
+                opost('/api/wireguard/general/set', {"general": {"enabled": '1'}})
+                logger.debug("WG enabled")
+        except ValueError as e:
+            logger.error(f"wireguard/general/get - Error message: {e}"); sys.exit(1)
+        try:
+            opost('/api/wireguard/service/reconfigure', {})
+        except ValueError as e:
+            logger.error(f"wireguard reconfigure - Error message: {e}"); sys.exit(1)
         open(inst.gwFile(),'w').write(wgi['server_vip'])
         logger.debug(f"Gateway {wgi['server_vip']} saved")
         try:
             new_ip(f"wg{inst.WGInstance}")
             new_ip(f"wg{inst.WGInstance}")
         except ValueError as e:
-            logger.error(f"newip: {e}")
+            logger.error(f"InformNewIP - Error message: {e}")
             sys.exit(1)
         logger.debug(f"{inst.Name} -> {inst.wgCn}")
 
