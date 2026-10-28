@@ -4,7 +4,7 @@ PIA WireGuard for OPNsense. Creates/updates WG instance+peer, monitors handshake
 changes servers, handles port forwarding. Run every 5-15 min via cron.
 Created by FingerlessGloves (FingerlessGlov3s on GitHub)
 """
-import argparse, base64, datetime, json, logging, os, re, secrets, socket, ssl, subprocess, sys, time, urllib3
+import argparse, base64, datetime, json, logging, os, re, secrets, shutil, socket, ssl, subprocess, sys, time, urllib3
 import requests
 from requests.adapters import HTTPAdapter
 
@@ -200,9 +200,20 @@ class Inst:
 # --- Helpers ---
 def fake_key(): return base64.b64encode(secrets.token_bytes(32)).decode()
 
+def configctl_path():
+    # Future-proof: prefer $CONFIGCTL, else the canonical OPNsense path, else PATH.
+    cand = [os.environ.get('CONFIGCTL'), '/usr/local/sbin/configctl', '/usr/local/etc/rc.d/configctl', shutil.which('configctl')]
+    for c in cand:
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return None
+
 def new_ip(iface):
+    cc = configctl_path()
+    if not cc:
+        raise ValueError("configctl: not found (tried $CONFIGCTL, /usr/local/sbin/configctl, PATH)")
     try:
-        subprocess.run(['/usr/local/sbin/configctl', 'interface', 'newip', iface, 'force'], capture_output=True, check=True)
+        subprocess.run([cc, 'interface', 'newip', iface, 'force'], capture_output=True, check=True)
     except subprocess.CalledProcessError as e:
         raise ValueError(f"configctl newip {iface}: {e}")
 
@@ -395,9 +406,12 @@ if __name__ == '__main__':
     args = ap.parse_args()
     if args.debug: logging.getLogger().setLevel(logging.DEBUG)
 
-    cfgf = os.path.join(sys.path[0], "PIAWireguard.json")
-    if not os.path.isfile(cfgf):
-        logger.error(f"Config not found: {cfgf}"); sys.exit(1)
+    # Future-proof: prefer $PIA_CONFIG, else the canonical /usr/local/etc/ (survives
+    # OPNsense upgrades), else the script's own dir. One source of truth -> no drift.
+    _cfgcands = [os.environ.get('PIA_CONFIG'), '/usr/local/etc/PIAWireguard.json', os.path.join(sys.path[0], "PIAWireguard.json")]
+    cfgf = next((c for c in _cfgcands if c and os.path.isfile(c)), None)
+    if not cfgf:
+        logger.error(f"Config not found (tried: {', '.join(c for c in _cfgcands if c)})"); sys.exit(1)
     with open(cfgf) as f:
         cfg = json.loads(f.read(), object_pairs_hook=_dk)
 
