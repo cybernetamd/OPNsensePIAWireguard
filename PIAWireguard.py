@@ -322,12 +322,13 @@ def port_forward(inst, epoch):
     if rpf is None:
         rid = info.get('region_id', '' if inst.Dip else inst.Region)
         if rid:
-            try: rpf = region_pf(rid)
+            try:
+                rpf = region_pf(rid)
+                if rpf is not None:
+                    info.update(region_id=rid, region_port_forward=rpf)
+                    json.dump(info, open(if_,'w'))
             except ValueError as e:
                 logger.error(f"Failed to get PIA Server List: {e}"); sys.exit(1)
-        if rpf is not None:
-            info.update(region_id=rid, region_port_forward=rpf)
-            json.dump(info, open(if_,'w'))
     if rpf is False:
         logger.warning(f"{inst.Name} has portForward enabled, but PIA region {info.get('region_id')} doesn't support port forwarding, so no port will be requested. " + "Either set portForward to false for this instance, or pick a region that supports it (see --listregions)")
         return
@@ -425,9 +426,8 @@ if __name__ == '__main__':
     cfgf = next((c for c in _cfgcands if c and os.path.isfile(c)), None)
     if not cfgf:
         logger.error(f"Config not found (tried: {', '.join(c for c in _cfgcands if c)})"); sys.exit(1)
-    with open(cfgf) as f:
-        cfg = json.loads(f.read(), object_pairs_hook=_dk)
-
+    # --listregions only needs the PIA server list, so it reads nothing
+    # from the config file and exits before validate() / _init_osess().
     if args.listregions:
         try:
             r = requests.get("https://serverlist.piaservers.net/vpninfo/servers/v6", headers={'User-Agent': UA}, timeout=15)
@@ -440,8 +440,8 @@ if __name__ == '__main__':
         logger.info("* Geo-located = not physically in exit region")
         sys.exit(0)
 
-    # --listregions only needs the PIA server list, so full config
-    # validation is deferred past the early-exit above.
+    with open(cfgf) as f:
+        cfg = json.loads(f.read(), object_pairs_hook=_dk)
     validate(cfg)
     logger.debug("Config OK")
     _init_osess()
@@ -629,6 +629,7 @@ if __name__ == '__main__':
         open(inst.gwFile(),'w').write(wgi['server_vip'])
         logger.debug(f"Gateway {wgi['server_vip']} saved")
         try:
+            # newip twice: the first can race the tunnel reconfigure, the second ensures it sticks
             new_ip(f"wg{inst.WGInstance}")
             new_ip(f"wg{inst.WGInstance}")
         except ValueError as e:
