@@ -68,6 +68,17 @@ def req(s, method, url, data=None, params=None, timeout=10):
 def oget(path):
     return json.loads(req(osess, 'GET', f"{config['opnsenseURL']}{path}").text)
 
+def scalarize(field):
+    """Normalize an OPNsense multivalue node to a clean scalar.
+    The API returns fields like dns/gateway as {'': {value, selected:1}};
+    setServer/setRoute then warn 'expected a single value' on POST. Collapsing
+    to a string (or list of strings) silences the log while staying valid."""
+    if isinstance(field, dict):
+        vals = [v.get('value') for v in field.values() if isinstance(v, dict) and v.get('selected')]
+        vals = [v for v in vals if v not in (None, '')]
+        return vals[0] if len(vals) == 1 else (vals if vals else '')
+    return field
+
 def opost(path, data):
     return json.loads(req(osess, 'POST', f"{config['opnsenseURL']}{path}", data=data).text)
 
@@ -244,7 +255,7 @@ def static_route(inst, ip):
     upd = False
     if uid == '':
         try:
-            res = opost('/api/routes/routes/addRoute/', {"route": {"disabled":'0','network':ip+'/32','gateway':tg,'descr':inst.WGPeerName}})
+            res = opost('/api/routes/routes/addRoute/', {"route": {"disabled":'0','network':ip+'/32','gateway':scalarize(tg),'descr':inst.WGPeerName}})
         except ValueError as e:
             raise ValueError(f"addRoute - Error message: {e}")
         if res['result'] != "saved": raise ValueError(f"addRoute - Error message: {res}")
@@ -258,7 +269,8 @@ def static_route(inst, ip):
         cgw = next((g for g in cur['route']['gateway'] if cur['route']['gateway'][g]['selected']==1), '')
         logger.debug(f"Current Gateway: {cgw}, Current Routed IP: {cip}")
         if cgw != tg or cip != ip+'/32':
-            cur['route'].update(network=ip+'/32', gateway=tg, disabled='0')
+            cur['route'].update(network=ip+'/32', gateway=scalarize(tg), disabled='0')
+            cur['route']['gateway'] = scalarize(cur['route']['gateway'])
             try:
                 res = opost(f"/api/routes/routes/setRoute/{uid}", cur)
             except ValueError as e:
@@ -285,6 +297,7 @@ def static_route_cleanup(inst):
         # Route was updated for this run (ip matches) -> keep it; else it's stale -> disable
         if cgw != tg or cip != inst.wgIp+'/32':
             cur['route'].update(disabled='1')
+            cur['route']['gateway'] = scalarize(cur['route']['gateway'])
             opost(f"/api/routes/routes/setRoute/{uid}", cur)
             opost('/api/routes/routes/reconfigure/', {})
             logger.debug(f"Stale route {cip} via {cgw} disabled")
@@ -455,7 +468,7 @@ if __name__ == '__main__':
                 logger.error("keyPair response non ok status - trying to generate wireGuard key pair"); sys.exit(2)
             inst.WGPubkey = kp['pubkey']
             try:
-                res = opost('/api/wireguard/server/addServer/', {"server":{"enabled":'0',"name":inst.WGInstanceName,"pubkey":kp['pubkey'],"privkey":kp['privkey'],"port":inst.WGPort,"tunneladdress":inst.WGIP,"disableroutes":'1',"gateway":inst.WGGateway}})
+                res = opost('/api/wireguard/server/addServer/', {"server":{"enabled":'0',"name":inst.WGInstanceName,"pubkey":kp['pubkey'],"privkey":kp['privkey'],"port":inst.WGPort,"tunneladdress":inst.WGIP,"disableroutes":'1',"gateway":scalarize(inst.WGGateway),"dns":''}})
             except ValueError as e:
                 logger.error(f"Add Instance (server) - Error message: {e}"); sys.exit(1)
             if res['result'] != 'saved':
@@ -585,9 +598,11 @@ if __name__ == '__main__':
             srv = oget(f"/api/wireguard/server/getServer/{inst.WGUUID}")
         except ValueError as e:
             logger.error(f"getServer - Error message: {e}"); sys.exit(1)
-        srv['server'].update(enabled='1', dns='', gateway=wgi['server_vip'], peers=inst.WGPeerUUID, port=inst.WGPort, tunneladdress=wgi['peer_ip']+'/32')
+        srv['server'].update(enabled='1', dns='', gateway=scalarize(wgi['server_vip']), peers=inst.WGPeerUUID, port=inst.WGPort, tunneladdress=wgi['peer_ip']+'/32')
         del srv['server']['instance']
         srv['server'].pop('carp_depend_on', None)
+        srv['server']['gateway'] = scalarize(srv['server']['gateway'])
+        srv['server']['dns'] = scalarize(srv['server']['dns'])
         try:
             opost(f"/api/wireguard/server/setServer/{inst.WGUUID}", srv)
         except ValueError as e:
