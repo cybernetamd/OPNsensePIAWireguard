@@ -65,10 +65,12 @@ You can also create a CRON job, allowing you to manually change the PIA server y
         - The variables listed above are the complete set the script understands. Anything else is ignored, and the script will log a warning telling you the key was not recognised, so check the log if a setting doesn't seem to do anything.
         - **The `wg0` / `wg1` device number is not a config variable.** You assign it in the OPNsense WebUI later on in this guide, and the script works out which one belongs to each instance by itself. There is no `interface` setting.
     1. Region ID info
-        - You can get your PIA region id by running `ListRegions.py` on your local device. 
-        - If you don't have Python installed on your local device you can use this [Online Python Tool](https://trinket.io/embed/python3/5bfe65475964) 
-            - Copy the contents of the file and then click `Run`. This will list the name and region id of each PIA region, for you choose from.
-        - It is also possible to get PIA region ids running the main script using the argument `--listregions`
+        - **Easiest:** run the main script with `--listregions` — it lists every PIA region and its id right from the router:
+            - `python3 /conf/PIAWireguard.py --listregions`
+        - <details><summary><b>Deprecated:</b> the old `ListRegions.py` helper</b></summary>
+            <p>You *can* still run the standalone `ListRegions.py` on a local device, but it is now **deprecated** — the main script's `--listregions` does the same job, so you don't need this file on your router anymore. It's kept in the repo for reference and backwards-compatibility.</p>
+            <p>If you don't have Python installed locally you can paste the file's contents into this [Online Python Tool](https://trinket.io/embed/python3/5bfe65475964) and click <code>Run</code>.</p>
+            </details>
  1. Copy the `PIAWireguard.json` file to `/conf/` on your OPNsense router using SCP or Filezilla etc, make sure you using the root user of OPNsense when you connect, otherwise you'll get access denied messages.
      - Example `scp .\PIAWireguard.json root@192.168.1.1:/conf/PIAWireguard.json`
  1. SSH to OPNsense and drop in to a terminal `option 8`. (If you've closed the previous SSH connection.)
