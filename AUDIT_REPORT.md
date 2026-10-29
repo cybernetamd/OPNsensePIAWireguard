@@ -1,6 +1,71 @@
-# PIA WireGuard OPNsense Stack — Fresh Re-Audit
-**Date:** 2026-10-28 | **Auditor:** opencode | **Scope:** matrix sections A–G (confirmation run)
-**Hosts:** Router `172.16.1.1` (OPNsense, csh) · DNS/DHCP `172.16.1.2` (Technitium+nginx, csh) · Client `172.16.1.101` (Debian, systemd-resolved)
+# PIA WireGuard OPNsense Stack — Deep Audit
+**Auditor:** opencode · **Hosts:** Router `172.16.1.1` (OPNsense, csh) · DNS/DHCP `172.16.1.2` (Technitium+nginx, csh) · Client `172.16.1.101` (Debian, systemd-resolved)
+
+> **Two audits, one file.**
+> - **2026-10-28 ~20:08 — Post-cleanup deep audit (current focus):** verifies the split-brain fix held and the deployment is clean + coherent (sections A–H below).
+> - **2026-10-28 ~16:15 — Original confirmation re-audit:** the full baseline-vs-observed matrix A–G (further down).
+
+---
+
+## 🔬 POST-CLEANUP DEEP AUDIT — `172.16.1.1`  (2026-10-28 ~20:08 ET)
+*Runs after the split-brain fix + full cleanup. Besides the usual health checks, **G** verifies the deployment is coherent (one script, right place, right config, right monitor) and **H** proves the new script survives the real 5-minute monitor.*
+
+### A — Crash triggers — 🟢 clean
+| Check | Observed | Verdict |
+|---|---|---|
+| `PHP_errors.log` | **ABSENT** (no Fatal/Exception/Warning) | PASS |
+| `/var/crash/` dumps | **0** real (no panics/OOM coredumps) | PASS |
+
+### B — Kernel + logs — 🟢 clean
+| Check | Observed | Verdict |
+|---|---|---|
+| Kernel panic / OOM / watchdog / hw-err | 0 / 0 / 0 / 0 | PASS |
+| System log errors | 0 | PASS |
+| configd errors | 2 — both the *old* 17:40 "Execute error", **pre-cleanup** residue (see H) | PASS (historical) |
+
+### C — Idempotency — 🟢 solid
+Ran the `/conf/` script **twice**, both `exit 0`, `PHP_errors.log` stayed **ABSENT** after. No runaway artifacts, no crash noise.
+
+### D — Tunnel + split-horizon — 🟢 correct
+| Check | Observed | Verdict |
+|---|---|---|
+| `wg0` | UP, handshake 1m40s, 57 MiB in / 16 MiB out | PASS |
+| Router egress | `104.159.102.188` (ISP — traffic bypasses tunnel) | PASS |
+| `default` route | → `104.159.102.129` via `vtnet1` | PASS |
+| `193.56.117.221/32` (Jellyfin) | → `172.16.1.3` via LAN — split-tunnel intact | PASS |
+| `100.64.0.0/10` + `192.168.0.0/24` | → `172.16.1.3` (Tailscale/LAN) | PASS |
+
+### E — Artifacts — 🟢 no orphans
+1 server (`PIA-WG`, port 51815) + 1 client (`PIA-WG-server`) + 3 routes. All expected, nothing stray.
+
+### F — Resources — 🟢 healthy
+Disk **29%** (6.2G free) · load **0.34** · **0** real zombies · 8 SSH sessions · up 2h25m.
+
+### G — Deployment integrity (new section — did the cleanup hold?) — 🟢
+| Check | Observed | Verdict |
+|---|---|---|
+| `/conf/PIAWireguard.py` MD5 | `d290c321…` = **matches repo/fork byte-for-byte** | PASS |
+| Config resolves to | `/conf/PIAWireguard.json` (script reads its **own dir**) | PASS |
+| Monitor points at | `python3 /conf/PIAWireguard.py` | PASS |
+| `/usr/local/etc/` twins | **0** (gone) | PASS |
+| `ListRegions.py` on router | **gone** (deprecated in repo, not needed on router) | PASS |
+| `.bak`/`.orig` clutter | **0** | PASS |
+| Backup safety net | 11 files in `/root/pia-backup-20261028/` | PASS |
+
+→ One script, in the right place, reading the right config, driven by the right monitor. No redundancy, no clutter.
+
+### H — Monitor live-tick (proven in the wild) — 🟢
+Watched the 5-minute monitor run the **new** `/conf/` script **4×** (19:50 / 19:55 / 20:00 / 20:05) — every tick returned **"returned"** (success). The **only** "Execute error" in the log is the old **17:40** one, pre-cleanup. Split-brain genuinely resolved, not just in theory.
+
+### Post-cleanup verdict
+> **🟢 HEALTHY — all A–H pass.** Functionally clean *and* the deployment is coherent. The earlier split-brain is confirmed gone: a single `PIAWireguard.py` lives in `/conf/` (byte-identical to the repo), reads `/conf/PIAWireguard.json`, and the OPNsense monitor drives *that* copy — proven by four clean ticks. The 2 configd errors are historical (17:40, pre-fix) and will age out on the next log rotation.
+>
+> **Follow-ups (none urgent):** ① On the next firmware update, re-verify `/conf/PIAWireguard.py` survived (it should — `/conf/` is upgrade-proof) and that `/usr/local/etc/` didn't get a stale twin re-created. ② Optionally prune `ListRegions.py` from the *parent* repo (upstream's call; it's already deprecated in this fork). ③ Watch one more monitor cycle or two to see the 17:40 error scroll out of `latest.log`.
+
+---
+
+# Fresh Re-Audit (original confirmation run)
+**Date:** 2026-10-28 ~16:15 | **Scope:** matrix sections A–G (baseline-vs-observed confirmation)
 
 **TL;DR: HEALTHY.** One confirmed drift (OPNsense 25.10.2 → 26.7, cosmetic-only). All A–G sections PASS. Live migration was a clean no-op (PIA returned the same US Chicago server). DNS/DHCP/split-tunnel chain fully proven. Config sha256 byte-for-byte unchanged.
 
