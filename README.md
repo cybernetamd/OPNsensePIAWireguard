@@ -111,11 +111,20 @@ You can also create a CRON job, allowing you to manually change the PIA server y
     1. Max MSS to `1380`
     1. Click `Save` (you will notice it'll now list this as OPT rather than the interface name, don't worry it's still correct, just edit it to verify you made the right selection)
     1. Click `Apply Changes`
- 1. OPNsense should now look after the tunnel itself encase the tunnel disconnects, every 5 minutes it'll check the status and change server if the server has gone down.
- 1. You'll need to create your own NAT and Firewall rules to use this tunnel, an advanced user should be able to do this.
-     - There is now a [guide on OPNsense Docs](https://docs.opnsense.org/manual/how-tos/wireguard-selective-routing.html#step-7-create-an-alias-for-the-relevant-local-hosts-that-will-access-the-tunnel), which will help you here. Step 7 onwards.
+  1. OPNsense should now look after the tunnel itself encase the tunnel disconnects, every 5 minutes it'll check the status and change server if the server has gone down.
+  1. You'll need to create your own NAT and Firewall rules to use this tunnel, an advanced user should be able to do this.
+      - There is now a [guide on OPNsense Docs](https://docs.opnsense.org/manual/how-tos/wireguard-selective-routing.html#step-7-create-an-alias-for-the-relevant-local-hosts-that-will-access-the-tunnel), which will help you here. Step 7 onwards.
+  1. *(Optional) Make the gateway come up online instantly after a reboot*
+      1. By default the `*/5` cron above is what gets the tunnel's gateway (e.g. `PIAGW_GW`) out of its "Undefined"/red state, so right after a reboot the gateway can sit red for up to ~4 minutes before the first cron tick fixes it. If you want it green almost immediately, add a boot hook that runs the same monitor action once at boot.
+      1. OPNsense ships a purpose-built place for "run this after the network is up" scripts: the `rc.syshook.d` system (see [Bootup / autorun options](https://docs.opnsense.org/development/backend/autorun.html)). Drop our hook in there:
+      - `fetch -o /usr/local/etc/rc.syshook.d/start/50-pia https://raw.githubusercontent.com/FingerlessGlov3s/OPNsensePIAWireguard/main/rc.syshook.d-start-50-pia.sh`
+      - `chmod +x /usr/local/etc/rc.syshook.d/start/50-pia`
+      1. The `start` syshook stage runs after system network startup (WAN has an IP), so the hook waits up to 30s for a WAN interface, then calls the proven `configctl piawireguard monitor` action once. That writes the `/tmp/wg0_router` pointer fast, and the gateway flips to "Online" within a couple of seconds of boot — no more waiting for the 4-minute cron.
+      1. The hook is idempotent (the monitor is safe to re-run), so it plays nicely with the `*/5` cron: the hook handles **boot**, the cron handles **runtime self-healing** if the tunnel drops later.
+      1. To confirm it works, reboot the router and check `System: Gateways` — `PIAGW_GW` should be Online well before the first cron tick. You can also see the hook's fingerprint in the system log:
+      - `grep rc_pia /var/log/system/latest.log`
 
-*Note: If your having speed issues, you may need to change PIA server region or lower the default MTU from 1420, advanced users should understand how to do this.*
+ *Note: If your having speed issues, you may need to change PIA server region or lower the default MTU from 1420, advanced users should understand how to do this.*
 
 **Updating**
 ===
