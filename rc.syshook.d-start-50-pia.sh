@@ -41,10 +41,17 @@ CFG=/usr/local/sbin/configctl
 [ -x $CFG ] || CFG=configctl
 $CFG piawireguard monitor >/dev/null 2>&1 &
 
-# Give the monitor a moment to write the endpoint pointer, then log the result.
-sleep 5
+# Wait for the monitor to write the endpoint pointer. PIA's server response
+# time varies boot to boot, so instead of a fixed 5s sleep we poll up to 20s.
+# A fast PIA response lands in the first second or two; a slow one still gets
+# caught here rather than spilling to the every-5-minutes cron.
+j=0
+while [ $j -lt 20 ]; do
+    if [ -f /tmp/wg0_router ]; then break; fi
+    j=$((j+1)); sleep 1
+done
 if [ -f /tmp/wg0_router ]; then
-    logger -t rc_pia "rc_pia[syshook]: SUCCESS /tmp/wg0_router=$(cat /tmp/wg0_router)"
+    logger -t rc_pia "rc_pia[syshook]: SUCCESS /tmp/wg0_router=$(cat /tmp/wg0_router) (after ${j}s)"
 else
-    logger -t rc_pia "rc_pia[syshook]: monitor ran; /tmp/wg0_router not set yet (cron will finish it)"
+    logger -t rc_pia "rc_pia[syshook]: monitor ran; /tmp/wg0_router not set yet after 20s (cron will finish it)"
 fi
